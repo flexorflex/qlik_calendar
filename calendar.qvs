@@ -1,14 +1,13 @@
-// Core Service: Calendar generation / join 
+// Calendar generation / join 
 //
 // Calendar generation functions for:
 //  - master calendar (incl. DE/EN date field, fields for shifted fiscal year, month, ...
 //  - n calendar tables (with field prefix)
 //  - join of reduced basis calendar into date source table
-//  - 4-4-5 calendar system (not implemented yet)
 //
 // The generated calendar fields includes common date parts and formatting style
 // as well as fiscal year and month values.
-//
+
 
 
 sub startCalendarService
@@ -81,7 +80,7 @@ sub generateCalendar (vCalendarQualifier)
 	LOAD *, 
 		if ($(vCalendarQualifier)$(vCalFMonth) < mod(month(today()) - $(vFirstMonth), 12) +1, 1, 0) AS $(vCalendarQualifier)YTM;
 	LOAD date(datefield, '$(DateFormat)') AS $(vCalendarQualifier)$(vCalDate),
-		date(datefield, '$(DateFormat)') AS $(vCalendarQualifier)%KEY_Datum,
+		//date(datefield, '$(DateFormat)') AS $(vCalendarQualifier)%KEY_Date,
 		date(datefield, 'DD.MM.YYYY') AS $(vCalendarQualifier)$(vCalDate)_DE,
 		date(datefield, 'MM/DD/YYYY') AS $(vCalendarQualifier)$(vCalDate)_EN,		
 		Day(datefield) AS $(vCalendarQualifier)$(vCalDay),
@@ -127,7 +126,7 @@ sub generateCalendar (vCalendarQualifier)
 	];
 
 //	3, ROY
-//	4, LTM
+
 	
 	calendar_time_range$(vCalendarQualifier):
 	LOAD $(vCalendarQualifier)$(vCalTimeRangeID), 
@@ -142,7 +141,7 @@ sub generateCalendar (vCalendarQualifier)
 	Resident calendar$(vCalendarQualifier) 
 	WHERE $(vCalendarQualifier)YTD = 1;	
 
-// ROY	
+// ROY	= rest of year
 //	Concatenate (calendar_time_range$(vCalendarQualifier)) 
 //	
 //	LOAD $(vCalendarQualifier)$(vCalTimeRangeID), 
@@ -150,7 +149,7 @@ sub generateCalendar (vCalendarQualifier)
 //	Resident calendar$(vCalendarQualifier) 
 //	WHERE $(vCalendarQualifier)YTD = 0;	
 
-// LTM	
+// LTM	= Last twelve months
 	Concatenate (calendar_time_range$(vCalendarQualifier)) 
 	
 	LOAD $(vCalendarQualifier)$(vCalTimeRangeID),  
@@ -217,13 +216,14 @@ sub stopCalendarService
 		
 end sub
 
-//Definition Kalendervariablen
- LET vCalendarStart = num(MakeDate(year(Today()),01,01));
- LET vCalendarEnd = num(MakeDate(Year(Today())+1,12,31));
- SET vDataModelLanguage = 'EN';
+// Examples: Variable definition
+// Beginning of current year to end of the following year
+// LET vCalendarStart = num(MakeDate(year(Today()),01,01));
+// LET vCalendarEnd = num(MakeDate(Year(Today())+1,12,31));
+// SET vDataModelLanguage = 'EN';
 
 
-//Aufruf der Kalenderroutine
-CALL startCalendarService;
-CALL generateCalendar;
-CALL stopCalendarService;
+// Examples: call methods to generate calendar w/t prefix
+// CALL startCalendarService;
+// CALL generateCalendar;
+// CALL stopCalendarService;
