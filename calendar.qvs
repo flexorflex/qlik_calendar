@@ -1,0 +1,229 @@
+// Core Service: Calendar generation / join 
+//
+// Calendar generation functions for:
+//  - master calendar (incl. DE/EN date field, fields for shifted fiscal year, month, ...
+//  - n calendar tables (with field prefix)
+//  - join of reduced basis calendar into date source table
+//  - 4-4-5 calendar system (not implemented yet)
+//
+// The generated calendar fields includes common date parts and formatting style
+// as well as fiscal year and month values.
+//
+
+
+sub startCalendarService
+
+	if (isNull(vCalendarFM) OR (vCalendarFM < 1 and vCalendarFM > 12)) then 
+		// business / fiscal year = calendar year
+		LET vCalendarFM = 1;
+		LET vFirstMonth = vCalendarFM;
+		LET vLastMonth = 12;
+	else 
+		// shifted business / fiscal year
+		LET vFirstMonth = vCalendarFM;
+		LET vLastMonth = 12 - (12 - vFirstMonth + 1); // in the next calendar year
+	end if
+
+	// multi language calendar field name mapping ...
+	calendarFieldNames:
+	LOAD * INLINE [
+	fieldKey, fieldName_DE, fieldName_EN
+	Date, Datum, date
+	Day, Tag, day	
+	Weekday, Wochentag, weekday
+	Week, Woche, week
+	WeekCurrent, Woche_aktuell, week_current
+	WeekPrevious, Woche_letzte, week_previous
+	Month, Monat, month	
+	MonthNo, Monat_Nr, month_no
+	MonthCurrent, Monat_aktuell, month_current
+	MonthPrevious, Monat_letzter, month_previous
+	Quarter, Quartal, quarter
+	Year, Jahr, year
+	YearWeek, Jahr_KW, year_week	
+	YearMonth, Jahr_Monat, year_month 
+	YearMonthName, Jahr_Monatsname, year_monthname 	
+	Workday, Arbeitstag, workday
+	Weekend, Wochenende, weekend
+	DaysAgo, Tage_vergangen, days_ago
+	MonthsAgo, Monate_vergangen, months_ago
+	FYear, Fiskaljahr, fiscal_year
+	FQuarter, Fiskalquartal, fiscal_quarter		
+	FMonth, Fiskalmonat, fiscal_month
+	FMonthCurrent, Fiskalmonat_aktuell, fiscal_month_current
+	FMonthPrevious, Fiskalmonat_letzter, fiscal_month_previous	
+	TimeRangeID, ZeitraumID, TimeRangeID
+	TimeRange, Zeitraum, TimeRange	
+	];
+
+	LET vCal_FieldIndex = NoOfRows('calendarFieldNames');
+	
+	FOR i=0 TO vCal_FieldIndex -1 
+		LET currentKey = peek('fieldKey', $(i));
+		LET vCal$(currentKey) = fieldValue('fieldName_$(vDataModelLanguage)', fieldIndex('fieldKey', '$(currentKey)') );	
+	NEXT
+		
+end sub
+
+sub generateCalendar (vCalendarQualifier) 
+
+	// call logInfo ('generate primary calendar (field name language $(vDataModelLanguage)) ');
+
+	if (not isNull(vCalendarQualifier) AND vCalendarQualifier <> '') then
+		// call logInfo ('=> with field qualifier $(vCalendarQualifier)');	
+	end if 
+
+	tmp_datefield:
+	LOAD date($(vCalendarStart)+rowno()-1) AS datefield
+	AUTOGENERATE ($(vCalendarEnd) - $(vCalendarStart)) +1;
+
+	calendar$(vCalendarQualifier):	
+	LOAD *, 
+		if ($(vCalendarQualifier)$(vCalFMonth) < mod(month(today()) - $(vFirstMonth), 12) +1, 1, 0) AS $(vCalendarQualifier)YTM;
+	LOAD date(datefield, '$(DateFormat)') AS $(vCalendarQualifier)$(vCalDate),
+		date(datefield, '$(DateFormat)') AS $(vCalendarQualifier)%KEY_Datum,
+		date(datefield, 'DD.MM.YYYY') AS $(vCalendarQualifier)$(vCalDate)_DE,
+		date(datefield, 'MM/DD/YYYY') AS $(vCalendarQualifier)$(vCalDate)_EN,		
+		Day(datefield) AS $(vCalendarQualifier)$(vCalDay),
+		Weekday(datefield) AS $(vCalendarQualifier)$(vCalWeekday),
+		Week(datefield) AS $(vCalendarQualifier)$(vCalWeek),
+		if (Week(datefield) = Week(today()), 1, 0) AS $(vCalendarQualifier)$(vCalWeekCurrent), 
+		if (Week(datefield) = Week(today()) -1, 1, 0) AS $(vCalendarQualifier)$(vCalWeekPrevious), 		
+		Month(datefield) AS $(vCalendarQualifier)$(vCalMonth),
+		num(Month(datefield)) AS $(vCalendarQualifier)$(vCalMonthNo),	
+		if (month(datefield) = month(today()), 1, 0) AS $(vCalendarQualifier)$(vCalMonthCurrent), 
+		if (month(datefield) = month(MonthStart(today()) -1), 1, 0) AS $(vCalendarQualifier)$(vCalMonthPrevious), 		
+		'Q' & ceil(month(datefield) / 3) AS $(vCalendarQualifier)$(vCalQuarter),
+		Year(datefield) AS $(vCalendarQualifier)$(vCalYear),
+		date(MonthStart(datefield), 'YYYY-MMM') AS $(vCalendarQualifier)$(vCalYearMonthName),
+		weekyear(datefield) & ' - ' & num(Week(datefield), '00') AS $(vCalendarQualifier)$(vCalYearWeek),
+		date(MonthStart(datefield), 'YYYY-MM') AS $(vCalendarQualifier)$(vCalYearMonth), 		
+		if (datefield >= AddMonths( MonthStart(Today()), -12) and datefield <= MonthStart(Today())-1 , 1, 0) AS $(vCalendarQualifier)LTM,			
+		if (WeekDay(datefield) < 5, 1, 0) AS $(vCalendarQualifier)$(vCalWorkday),
+		if (WeekDay(datefield) >= 5, 1, 0) AS $(vCalendarQualifier)$(vCalWeekend), 
+		Today()- datefield AS $(vCalendarQualifier)$(vCalDaysAgo),
+		12 * (Year(Today()) - Year(datefield)) + Month(Today()) - Month(datefield) AS $(vCalendarQualifier)$(vCalMonthsAgo), 
+		date(datefield, '$(DateFormat)') AS $(vCalendarQualifier)$(vCalTimeRangeID), 
+		// Business / Fiscal Year
+		year(datefield) + if (month(datefield) >= $(vFirstMonth), 1, 0) AS $(vCalendarQualifier)$(vCalFYear), 
+		'Q' & ceil(month(addMonths(datefield, ($(vFirstMonth) -1) * -1 )) / 3) AS $(vCalendarQualifier)$(vCalFQuarter), 			
+		mod(month(datefield) - $(vFirstMonth), 12) +1 AS $(vCalendarQualifier)$(vCalFMonth),
+		if (num(month(datefield)) = (mod(month(today()) - $(vFirstMonth), 12) +1), 1, 0) AS $(vCalendarQualifier)$(vCalFMonthCurrent), 
+		if (num(month(datefield)) = (mod(month(today()) - $(vFirstMonth), 12) +1) -1, 1, 0) AS $(vCalendarQualifier)$(vCalFMonthPrevious), 				
+		if (DayNumberOfYear(datefield, $(vFirstMonth)) < DayNumberOfYear(today(), $(vFirstMonth)), 1, 0) AS $(vCalendarQualifier)YTD
+	RESIDENT tmp_datefield;
+
+	DROP Table tmp_datefield;
+
+	// TimeRange Ext. (YTM, YTD, ROY, ...)
+	time_ranges$(vCalendarQualifier):
+	LOAD %TIME_RANGE_PKEY AS %TIME_RANGE_$(vCalendarQualifier)PKEY, 
+		TIME_RANGE AS $(vCalendarQualifier)TIME_RANGE 
+	INLINE [
+	%TIME_RANGE_PKEY, TIME_RANGE
+	1, YTM
+	2, YTD
+	4, LTM
+	];
+
+//	3, ROY
+//	4, LTM
+	
+	calendar_time_range$(vCalendarQualifier):
+	LOAD $(vCalendarQualifier)$(vCalTimeRangeID), 
+		1 AS %TIME_RANGE_$(vCalendarQualifier)PKEY
+	Resident calendar$(vCalendarQualifier) 
+	WHERE $(vCalendarQualifier)YTM = 1;
+	
+	Concatenate (calendar_time_range$(vCalendarQualifier)) 
+	
+	LOAD $(vCalendarQualifier)$(vCalTimeRangeID), 
+		2 AS %TIME_RANGE_$(vCalendarQualifier)PKEY
+	Resident calendar$(vCalendarQualifier) 
+	WHERE $(vCalendarQualifier)YTD = 1;	
+
+// ROY	
+//	Concatenate (calendar_time_range$(vCalendarQualifier)) 
+//	
+//	LOAD $(vCalendarQualifier)$(vCalTimeRangeID), 
+//		3 AS %TIME_RANGE_$(vCalendarQualifier)PKEY
+//	Resident calendar$(vCalendarQualifier) 
+//	WHERE $(vCalendarQualifier)YTD = 0;	
+
+// LTM	
+	Concatenate (calendar_time_range$(vCalendarQualifier)) 
+	
+	LOAD $(vCalendarQualifier)$(vCalTimeRangeID),  
+		4 AS %TIME_RANGE_$(vCalendarQualifier)PKEY
+	Resident calendar$(vCalendarQualifier) 
+	WHERE $(vCalendarQualifier)LTM = 1;	
+		
+
+	TAG FIELDS $(vCalendarQualifier)$(vCalYearMonth), $(vCalendarQualifier)$(vCalYear) WITH '$dimension';
+	TAG FIELDS $(vCalendarQualifier)$(vCalMonth), $(vCalendarQualifier)YTD, $(vCalendarQualifier)YTM WITH '$dimension';
+	TAG FIELD $(vCalendarQualifier)TIME_RANGE WITH '$dimension';	
+
+	LET vCalendarQualifier = null(); 
+	
+end sub
+
+
+sub joinCalendar (targetTable, srcDateField, fieldPrefix)
+
+	// call logInfo ('generate calendar (field name language $(vDataModelLanguage)) based on $(srcDateField) and join it to table $(targetTable) with field prefix $(fieldPrefix)');
+		
+	LET _srcDateField=PurgeChar(srcDateField,'"[]');
+
+	tmp_datefield:
+	LOAD Num(Fieldvalue('$(_srcDateField)',RecNo())) AS datefield
+	AUTOGENERATE FieldValueCount('$(_srcDateField)');	
+
+	LEFT JOIN ([$(targetTable)])
+	
+	LOAD DISTINCT date(datefield) AS $(srcDateField),  
+		 Year(datefield) AS $(fieldPrefix)_$(vCalYear),
+		Month(datefield) AS $(fieldPrefix)_$(vCalMonth),
+		date(MonthStart(datefield), 'YYYY-MM') AS $(fieldPrefix)_$(vCalYearMonth), 		
+		if (DayNumberOfYear(datefield) < DayNumberOfYear(today()), 1, 0) AS $(fieldPrefix)_YTD  
+	RESIDENT tmp_datefield;
+
+	DROP Table tmp_datefield;
+
+	TAG FIELDS $(fieldPrefix)$(vCalYearMonth), $(fieldPrefix)$(vCalYear) WITH '$dimension';
+	TAG FIELDS $(fieldPrefix)$(vCalMonth), $(fieldPrefix)YTD WITH '$dimension';
+	
+	LET targetTable = null();
+	LET srcDateField = null();
+	LET fieldPrefix = null();
+	
+end sub
+
+
+sub stopCalendarService
+
+	FOR i=0 TO vCal_FieldIndex 
+		LET currentKey = FieldValue('fieldKey', i);
+		LET vCal$(currentKey) = null();	
+	NEXT
+
+	DROP Table calendarFieldNames;
+
+	LET vCal_FieldIndex = null();
+	LET currentKey = null();
+	LET vCalendarQualifier=null();
+	LET vCalendarStart=null();
+	LET vCalendarEnd=null();
+	LET vCalendarFM=null();
+		
+end sub
+
+//Definition Kalendervariablen
+ LET vCalendarStart = num(MakeDate(year(Today()),01,01));
+ LET vCalendarEnd = num(MakeDate(Year(Today())+1,12,31));
+ SET vDataModelLanguage = 'EN';
+
+
+//Aufruf der Kalenderroutine
+CALL startCalendarService;
+CALL generateCalendar;
+CALL stopCalendarService;
