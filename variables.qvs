@@ -183,10 +183,10 @@ end sub
 // ============================================================
 //
 // var_name;var_definition;var_label;var_group
-// vSales;Sum(Sales);Umsatz;KPI
-// vMargin;Sum(Margin)/Sum(Sales);Marge %;KPI
-// vOrderCount;Count(DISTINCT OrderID);Anzahl Aufträge;KPI
-// vAvgOrderValue;Sum(Sales)/Count(DISTINCT OrderID);Ø Auftragswert;KPI
+// vSales;Sum(Sales);Revenue;KPI
+// vMargin;Sum(Margin)/Sum(Sales);Margin %;KPI
+// vOrderCount;Count(DISTINCT OrderID);Order Count;KPI
+// vAvgOrderValue;Sum(Sales)/Count(DISTINCT OrderID);Avg Order Value;KPI
 
 
 // ============================================================
