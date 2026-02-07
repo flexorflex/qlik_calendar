@@ -1,0 +1,302 @@
+// Time Dimension for Qlik Sense
+//
+// Generates a time lookup table with minute-level granularity (1440 rows)
+// for joining to fact tables with timestamp fields.
+//
+// Provides:
+//   - Hour, minute, formatted time
+//   - Time slots (configurable interval: 15, 30, 60 min)
+//   - Day period classification (Morning, Afternoon, Evening, Night)
+//   - Shift assignment (configurable)
+//   - Peak/Off-Peak flag (configurable)
+//   - Multi-language support (DE/EN)
+//
+// Usage:
+//   1. Set configuration variables (optional)
+//   2. CALL generateTimeDimension()
+//   3. CALL joinTimeDimension(targetTable, srcTimestampField, fieldPrefix)
+//   4. CALL cleanupTimeDimension()
+//
+// Requires: logging.qvs (optional but recommended)
+
+
+sub generateTimeDimension
+
+	CALL logInfo('Time Dimension: generating (language $(vDataModelLanguage))');
+
+	// Defaults for configuration
+	IF IsNull(vTimeSlotMinutes) OR vTimeSlotMinutes < 1 THEN
+		LET vTimeSlotMinutes = 30;
+	END IF
+
+	// Shift definitions (defaults: 3-shift model)
+	IF len('$(vTimeShift1Start)') = 0 THEN
+		LET vTimeShift1Start = 6;
+		LET vTimeShift1End = 14;
+		LET vTimeShift1Name_DE = 'Frühschicht';
+		LET vTimeShift1Name_EN = 'Early Shift';
+	END IF
+
+	IF len('$(vTimeShift2Start)') = 0 THEN
+		LET vTimeShift2Start = 14;
+		LET vTimeShift2End = 22;
+		LET vTimeShift2Name_DE = 'Spätschicht';
+		LET vTimeShift2Name_EN = 'Late Shift';
+	END IF
+
+	IF len('$(vTimeShift3Start)') = 0 THEN
+		LET vTimeShift3Start = 22;
+		LET vTimeShift3End = 6;
+		LET vTimeShift3Name_DE = 'Nachtschicht';
+		LET vTimeShift3Name_EN = 'Night Shift';
+	END IF
+
+	// Peak hours (defaults: 08-18)
+	IF IsNull(vTimePeakStart) THEN
+		LET vTimePeakStart = 8;
+		LET vTimePeakEnd = 18;
+	END IF
+
+	// Language-dependent field names
+	IF '$(vDataModelLanguage)' = 'DE' THEN
+		LET _tdTime = 'Uhrzeit';
+		LET _tdHour = 'Stunde';
+		LET _tdMinute = 'Minute';
+		LET _tdTimeSlot = 'Zeitfenster';
+		LET _tdDayPeriod = 'Tageszeit';
+		LET _tdShift = 'Schicht';
+		LET _tdPeak = 'Hauptzeit';
+		LET _tdMorning = 'Morgen';
+		LET _tdAfternoon = 'Nachmittag';
+		LET _tdEvening = 'Abend';
+		LET _tdNight = 'Nacht';
+		LET _tdShift1 = '$(vTimeShift1Name_DE)';
+		LET _tdShift2 = '$(vTimeShift2Name_DE)';
+		LET _tdShift3 = '$(vTimeShift3Name_DE)';
+	ELSE
+		LET _tdTime = 'time';
+		LET _tdHour = 'hour';
+		LET _tdMinute = 'minute';
+		LET _tdTimeSlot = 'time_slot';
+		LET _tdDayPeriod = 'day_period';
+		LET _tdShift = 'shift';
+		LET _tdPeak = 'peak_hour';
+		LET _tdMorning = 'Morning';
+		LET _tdAfternoon = 'Afternoon';
+		LET _tdEvening = 'Evening';
+		LET _tdNight = 'Night';
+		LET _tdShift1 = '$(vTimeShift1Name_EN)';
+		LET _tdShift2 = '$(vTimeShift2Name_EN)';
+		LET _tdShift3 = '$(vTimeShift3Name_EN)';
+	END IF
+
+	// Generate 1440 rows (one per minute of the day)
+	time_dimension:
+	LOAD
+		time(makeTime(floor(recno_minus / 60), mod(recno_minus, 60)), 'hh:mm') AS $(_tdTime),
+		floor(recno_minus / 60) AS $(_tdHour),
+		mod(recno_minus, 60) AS $(_tdMinute),
+
+		// Time slot (aligned to interval)
+		time(makeTime(floor(recno_minus / 60), floor(mod(recno_minus, 60) / $(vTimeSlotMinutes)) * $(vTimeSlotMinutes)), 'hh:mm')
+		& ' - '
+		& time(makeTime(floor(recno_minus / 60), floor(mod(recno_minus, 60) / $(vTimeSlotMinutes)) * $(vTimeSlotMinutes) + $(vTimeSlotMinutes) - 1), 'hh:mm')
+		AS $(_tdTimeSlot),
+
+		// Day period
+		if (floor(recno_minus / 60) >= 6 AND floor(recno_minus / 60) < 12, '$(_tdMorning)',
+		if (floor(recno_minus / 60) >= 12 AND floor(recno_minus / 60) < 18, '$(_tdAfternoon)',
+		if (floor(recno_minus / 60) >= 18 AND floor(recno_minus / 60) < 22, '$(_tdEvening)',
+		'$(_tdNight)'))) AS $(_tdDayPeriod),
+
+		// Shift assignment (handles night shift wrapping around midnight)
+		if (floor(recno_minus / 60) >= $(vTimeShift1Start) AND floor(recno_minus / 60) < $(vTimeShift1End), '$(_tdShift1)',
+		if (floor(recno_minus / 60) >= $(vTimeShift2Start) AND floor(recno_minus / 60) < $(vTimeShift2End), '$(_tdShift2)',
+		'$(_tdShift3)')) AS $(_tdShift),
+
+		// Peak / Off-Peak
+		if (floor(recno_minus / 60) >= $(vTimePeakStart) AND floor(recno_minus / 60) < $(vTimePeakEnd), 1, 0) AS $(_tdPeak)
+
+	;
+	LOAD
+		recno() - 1 AS recno_minus
+	AUTOGENERATE 1440;
+
+	TAG FIELDS $(_tdHour), $(_tdTimeSlot), $(_tdDayPeriod), $(_tdShift) WITH '$dimension';
+
+	LET _tdRowCount = NoOfRows('time_dimension');
+	CALL logInfo('Time Dimension: generated $(_tdRowCount) rows ($(vTimeSlotMinutes) min slots)');
+	LET _tdRowCount = null();
+
+end sub
+
+
+sub joinTimeDimension (vTdTargetTable, vTdSrcTimestampField, vTdFieldPrefix)
+
+	// Extracts time (hh:mm) from a timestamp field and joins time dimension fields.
+	CALL logInfo('Time Dimension: joining to $(vTdTargetTable) on $(vTdSrcTimestampField) with prefix $(vTdFieldPrefix)');
+
+	// Language-dependent field names (reuse from generateTimeDimension)
+	IF '$(vDataModelLanguage)' = 'DE' THEN
+		LET _tdTime = 'Uhrzeit';
+		LET _tdHour = 'Stunde';
+		LET _tdTimeSlot = 'Zeitfenster';
+		LET _tdDayPeriod = 'Tageszeit';
+		LET _tdShift = 'Schicht';
+		LET _tdPeak = 'Hauptzeit';
+	ELSE
+		LET _tdTime = 'time';
+		LET _tdHour = 'hour';
+		LET _tdTimeSlot = 'time_slot';
+		LET _tdDayPeriod = 'day_period';
+		LET _tdShift = 'shift';
+		LET _tdPeak = 'peak_hour';
+	END IF
+
+	LET _tdSrcClean = PurgeChar(vTdSrcTimestampField, '"[]');
+
+	// Extract distinct time values (minute precision) from source
+	_td_join_tmp:
+	LOAD DISTINCT
+		time(makeTime(hour([$(_tdSrcClean)]), minute([$(_tdSrcClean)])), 'hh:mm') AS _td_join_time
+	RESIDENT [$(vTdTargetTable)];
+
+	// Join time attributes via the time_dimension table
+	LEFT JOIN (_td_join_tmp)
+	LOAD $(_tdTime) AS _td_join_time,
+		$(_tdHour) AS $(vTdFieldPrefix)_$(_tdHour),
+		$(_tdTimeSlot) AS $(vTdFieldPrefix)_$(_tdTimeSlot),
+		$(_tdDayPeriod) AS $(vTdFieldPrefix)_$(_tdDayPeriod),
+		$(_tdShift) AS $(vTdFieldPrefix)_$(_tdShift),
+		$(_tdPeak) AS $(vTdFieldPrefix)_$(_tdPeak)
+	RESIDENT time_dimension;
+
+	// Join results into target table
+	LEFT JOIN ([$(vTdTargetTable)])
+	LOAD _td_join_time AS [_td_time_key_$(vTdFieldPrefix)],
+		$(vTdFieldPrefix)_$(_tdHour),
+		$(vTdFieldPrefix)_$(_tdTimeSlot),
+		$(vTdFieldPrefix)_$(_tdDayPeriod),
+		$(vTdFieldPrefix)_$(_tdShift),
+		$(vTdFieldPrefix)_$(_tdPeak)
+	RESIDENT _td_join_tmp;
+
+	DROP TABLE _td_join_tmp;
+
+	// Create the time key in the target table for the join
+	LEFT JOIN ([$(vTdTargetTable)])
+	LOAD [$(vTdSrcTimestampField)],
+		time(makeTime(hour([$(vTdSrcTimestampField)]), minute([$(vTdSrcTimestampField)])), 'hh:mm') AS [_td_time_key_$(vTdFieldPrefix)]
+	RESIDENT [$(vTdTargetTable)];
+
+	TAG FIELDS $(vTdFieldPrefix)_$(_tdHour), $(vTdFieldPrefix)_$(_tdTimeSlot) WITH '$dimension';
+	TAG FIELDS $(vTdFieldPrefix)_$(_tdDayPeriod), $(vTdFieldPrefix)_$(_tdShift) WITH '$dimension';
+
+	CALL logInfo('Time Dimension: joined to $(vTdTargetTable)');
+
+	LET _tdSrcClean = null();
+	LET vTdTargetTable = null();
+	LET vTdSrcTimestampField = null();
+	LET vTdFieldPrefix = null();
+
+end sub
+
+
+sub cleanupTimeDimension
+
+	// Clean up language variables
+	LET _tdTime = null();
+	LET _tdHour = null();
+	LET _tdMinute = null();
+	LET _tdTimeSlot = null();
+	LET _tdDayPeriod = null();
+	LET _tdShift = null();
+	LET _tdPeak = null();
+	LET _tdMorning = null();
+	LET _tdAfternoon = null();
+	LET _tdEvening = null();
+	LET _tdNight = null();
+	LET _tdShift1 = null();
+	LET _tdShift2 = null();
+	LET _tdShift3 = null();
+
+	// Clean up config variables
+	LET vTimeSlotMinutes = null();
+	LET vTimeShift1Start = null();
+	LET vTimeShift1End = null();
+	LET vTimeShift1Name_DE = null();
+	LET vTimeShift1Name_EN = null();
+	LET vTimeShift2Start = null();
+	LET vTimeShift2End = null();
+	LET vTimeShift2Name_DE = null();
+	LET vTimeShift2Name_EN = null();
+	LET vTimeShift3Start = null();
+	LET vTimeShift3End = null();
+	LET vTimeShift3Name_DE = null();
+	LET vTimeShift3Name_EN = null();
+	LET vTimePeakStart = null();
+	LET vTimePeakEnd = null();
+
+	CALL logInfo('Time Dimension: cleanup completed');
+
+end sub
+
+
+// ============================================================
+// Example: Default configuration (30-min slots, 3-shift model)
+// ============================================================
+//
+// $(Include=lib://Scripts/logging.qvs);
+// $(Include=lib://Scripts/time_dimension.qvs);
+//
+// SET vDataModelLanguage = 'DE';
+// CALL logInit('Mein Dashboard');
+// CALL generateTimeDimension;
+// CALL cleanupTimeDimension;
+// CALL logFinalize;
+
+
+// ============================================================
+// Example: Custom configuration
+// ============================================================
+//
+// SET vDataModelLanguage = 'EN';
+// LET vTimeSlotMinutes = 15;           // 15-minute time slots
+//
+// // Custom shift model (2-shift)
+// LET vTimeShift1Start = 6;
+// LET vTimeShift1End = 18;
+// LET vTimeShift1Name_DE = 'Tagschicht';
+// LET vTimeShift1Name_EN = 'Day Shift';
+// LET vTimeShift2Start = 18;
+// LET vTimeShift2End = 6;
+// LET vTimeShift2Name_DE = 'Nachtschicht';
+// LET vTimeShift2Name_EN = 'Night Shift';
+// LET vTimeShift3Start = 0;     // unused, set equal to shift 2
+// LET vTimeShift3End = 0;
+// LET vTimeShift3Name_DE = 'Nachtschicht';
+// LET vTimeShift3Name_EN = 'Night Shift';
+//
+// // Custom peak hours
+// LET vTimePeakStart = 9;
+// LET vTimePeakEnd = 17;
+//
+// CALL generateTimeDimension;
+// CALL cleanupTimeDimension;
+
+
+// ============================================================
+// Example: Join time dimension to fact table
+// ============================================================
+//
+// CALL generateTimeDimension;
+//
+// // Load fact table with timestamps
+// FactOrders:
+// SQL SELECT OrderID, OrderTimestamp, Amount FROM dbo.Orders;
+//
+// // Join time fields to fact table
+// CALL joinTimeDimension('FactOrders', 'OrderTimestamp', 'Order');
+// // Creates: Order_hour, Order_time_slot, Order_day_period, Order_shift, Order_peak_hour
+//
+// CALL cleanupTimeDimension;

@@ -11,6 +11,7 @@ Wiederverwendbare QVS-Routinen für Qlik Sense Ladescripte.
 | `incremental_load.qvs` | Inkrementelles Laden mit QVD-Watermarking (Upsert / Append) |
 | `variables.qvs` | Zentrale Variablen-/KPI-Verwaltung mit Set-Analysis-Generator |
 | `data_quality.qvs` | Automatische Datenqualitätsprüfung (Profiling, NULLs, FK, Duplikate) |
+| `time_dimension.qvs` | Uhrzeitkalender mit Zeitfenstern, Tageszeit, Schichten, Peak/Off-Peak |
 
 ---
 
@@ -680,3 +681,170 @@ Die `_data_quality`-Tabelle kann direkt in einem Qlik Sheet visualisiert werden:
 - **Tabelle** mit `dq_severity` als Farbindikator (OK=grün, WARN=gelb, ERROR=rot)
 - **KPI** mit `Count({<dq_severity={'ERROR'}>} dq_seq)` für Error-Count
 - **Filter** auf `dq_check` und `dq_table` für gezieltes Drilling
+
+---
+
+## time_dimension.qvs — Uhrzeitkalender
+
+Generiert eine Zeitdimension mit Minuten-Granularität (1440 Zeilen) für Analysen auf Uhrzeitbasis. Unterstützt konfigurierbare Zeitfenster, Schichtmodelle und Peak-/Off-Peak-Markierung.
+
+### Generierte Felder
+
+| Feld (DE) | Feld (EN) | Beschreibung | Beispiel |
+|-----------|-----------|-------------|---------|
+| Uhrzeit | time | Formatierte Uhrzeit (hh:mm) | `14:30` |
+| Stunde | hour | Stunde (0-23) | `14` |
+| Minute | minute | Minute (0-59) | `30` |
+| Zeitfenster | time_slot | Zeitslot nach Intervall | `14:00 - 14:29` |
+| Tageszeit | day_period | Tageszeit-Klassifizierung | `Nachmittag` |
+| Schicht | shift | Schichtzuordnung | `Spätschicht` |
+| Hauptzeit | peak_hour | Peak-/Off-Peak-Flag (1/0) | `1` |
+
+### Konfiguration
+
+Alle Variablen sind optional — ohne Konfiguration werden Defaults verwendet.
+
+#### Zeitfenster
+
+| Variable | Default | Beschreibung |
+|----------|---------|-------------|
+| `vTimeSlotMinutes` | `30` | Intervall in Minuten (z.B. 15, 30, 60) |
+
+#### Schichtmodell
+
+Default: 3-Schicht-Modell (Früh 06-14, Spät 14-22, Nacht 22-06)
+
+| Variable | Default | Beschreibung |
+|----------|---------|-------------|
+| `vTimeShift1Start` | `6` | Beginn Schicht 1 (Stunde) |
+| `vTimeShift1End` | `14` | Ende Schicht 1 |
+| `vTimeShift1Name_DE/EN` | `Frühschicht / Early Shift` | Name |
+| `vTimeShift2Start` | `14` | Beginn Schicht 2 |
+| `vTimeShift2End` | `22` | Ende Schicht 2 |
+| `vTimeShift2Name_DE/EN` | `Spätschicht / Late Shift` | Name |
+| `vTimeShift3Start` | `22` | Beginn Schicht 3 |
+| `vTimeShift3End` | `6` | Ende Schicht 3 (nächster Tag) |
+| `vTimeShift3Name_DE/EN` | `Nachtschicht / Night Shift` | Name |
+
+#### Peak-Stunden
+
+| Variable | Default | Beschreibung |
+|----------|---------|-------------|
+| `vTimePeakStart` | `8` | Beginn Peak-Zeitraum |
+| `vTimePeakEnd` | `18` | Ende Peak-Zeitraum |
+
+### Tageszeit-Zuordnung
+
+| Stunden | Tageszeit (DE) | Tageszeit (EN) |
+|---------|---------------|----------------|
+| 06:00 - 11:59 | Morgen | Morning |
+| 12:00 - 17:59 | Nachmittag | Afternoon |
+| 18:00 - 21:59 | Abend | Evening |
+| 22:00 - 05:59 | Nacht | Night |
+
+### Subroutinen
+
+#### `generateTimeDimension`
+
+Erzeugt die `time_dimension`-Tabelle mit 1440 Zeilen (eine pro Minute).
+
+```qlik
+CALL generateTimeDimension;
+```
+
+#### `joinTimeDimension (targetTable, srcTimestampField, fieldPrefix)`
+
+Extrahiert die Uhrzeit (hh:mm) aus einem Timestamp-Feld und joint die Zeitdimensions-Felder in die Zieltabelle.
+
+```qlik
+CALL joinTimeDimension('FactOrders', 'OrderTimestamp', 'Order');
+// Erzeugt: Order_hour, Order_time_slot, Order_day_period, Order_shift, Order_peak_hour
+```
+
+| Parameter | Beschreibung |
+|-----------|-------------|
+| `targetTable` | Name der Zieltabelle |
+| `srcTimestampField` | Timestamp-Feld in der Zieltabelle |
+| `fieldPrefix` | Prefix für die generierten Felder |
+
+#### `cleanupTimeDimension`
+
+Räumt alle Konfigurations- und internen Variablen auf. Die `time_dimension`-Tabelle bleibt im Datenmodell.
+
+```qlik
+CALL cleanupTimeDimension;
+```
+
+### Beispiel 1: Standard (30-Min-Slots, 3-Schicht)
+
+```qlik
+$(Include=lib://Scripts/logging.qvs);
+$(Include=lib://Scripts/time_dimension.qvs);
+
+SET vDataModelLanguage = 'DE';
+CALL logInit('Mein Dashboard');
+
+CALL generateTimeDimension;
+CALL cleanupTimeDimension;
+
+CALL logFinalize;
+```
+
+### Beispiel 2: Custom (15-Min-Slots, 2-Schicht, Peak 09-17)
+
+```qlik
+SET vDataModelLanguage = 'EN';
+LET vTimeSlotMinutes = 15;
+
+// 2-Shift model
+LET vTimeShift1Start = 6;
+LET vTimeShift1End = 18;
+LET vTimeShift1Name_DE = 'Tagschicht';
+LET vTimeShift1Name_EN = 'Day Shift';
+LET vTimeShift2Start = 18;
+LET vTimeShift2End = 6;
+LET vTimeShift2Name_DE = 'Nachtschicht';
+LET vTimeShift2Name_EN = 'Night Shift';
+LET vTimeShift3Start = 0;
+LET vTimeShift3End = 0;
+LET vTimeShift3Name_DE = 'Nachtschicht';
+LET vTimeShift3Name_EN = 'Night Shift';
+
+LET vTimePeakStart = 9;
+LET vTimePeakEnd = 17;
+
+CALL generateTimeDimension;
+CALL cleanupTimeDimension;
+```
+
+### Beispiel 3: Integration mit Kalender + Join auf Faktentabelle
+
+```qlik
+$(Include=lib://Scripts/logging.qvs);
+$(Include=lib://Scripts/calendar.qvs);
+$(Include=lib://Scripts/time_dimension.qvs);
+
+CALL logInit('Production Dashboard');
+
+// Kalender
+LET vCalendarStart = num(MakeDate(year(Today()), 01, 01));
+LET vCalendarEnd   = num(MakeDate(Year(Today()) + 1, 12, 31));
+SET vDataModelLanguage = 'DE';
+
+CALL startCalendarService;
+CALL generateCalendar;
+CALL stopCalendarService;
+
+// Zeitdimension
+CALL generateTimeDimension;
+
+// Faktentabelle laden
+FactProduction:
+SQL SELECT EventID, EventTimestamp, MachineID, Quantity FROM dbo.Production;
+
+// Zeit-Felder zur Faktentabelle joinen
+CALL joinTimeDimension('FactProduction', 'EventTimestamp', 'Event');
+
+CALL cleanupTimeDimension;
+CALL logFinalize;
+```
