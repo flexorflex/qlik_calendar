@@ -1,0 +1,332 @@
+// Data Quality Framework for Qlik Sense
+//
+// Automated data quality checks after loading tables.
+// Provides profiling, null/empty checks, referential integrity validation,
+// date range plausibility, and duplicate detection.
+//
+// All results are collected in a _data_quality table that remains in the
+// data model for QA dashboards. Each check produces rows with severity
+// levels (OK, WARN, ERROR) for filtering.
+//
+// Usage:
+//   1. CALL dqInit()
+//   2. Run checks (profileTable, validateNotNull, validateFK, ...)
+//   3. CALL dqFinalize()
+//
+// Requires: logging.qvs (optional but recommended)
+
+
+sub dqInit
+
+	LET _dqSeq = 0;
+
+	IF NOT IsNull(TableNumber('_data_quality')) THEN
+		DROP TABLE _data_quality;
+	END IF
+
+	_data_quality:
+	LOAD * INLINE [
+	dq_seq, dq_timestamp, dq_check, dq_table, dq_field, dq_severity, dq_message, dq_value
+	];
+
+	CALL logInfo('Data Quality: initialized');
+
+end sub
+
+
+sub _dqWrite (vDqCheck, vDqTable, vDqField, vDqSeverity, vDqMessage, vDqValue)
+
+	LET _dqSeq = $(_dqSeq) + 1;
+
+	Concatenate (_data_quality)
+	LOAD * INLINE [
+	dq_seq, dq_timestamp, dq_check, dq_table, dq_field, dq_severity, dq_message, dq_value
+	$(_dqSeq), $(Now()), $(vDqCheck), $(vDqTable), $(vDqField), $(vDqSeverity), $(vDqMessage), $(vDqValue)
+	];
+
+	IF '$(vDqSeverity)' = 'ERROR' THEN
+		CALL logError('DQ [$(vDqTable).$(vDqField)] $(vDqMessage)');
+	ELSEIF '$(vDqSeverity)' = 'WARN' THEN
+		CALL logWarn('DQ [$(vDqTable).$(vDqField)] $(vDqMessage)');
+	END IF
+
+end sub
+
+
+sub profileTable (vDqTableName)
+
+	// Profiles all fields in a table: row count, null count, distinct count.
+	// Results are written to _data_quality with check type 'PROFILE'.
+
+	LET _dqRowCount = NoOfRows('$(vDqTableName)');
+	LET _dqFieldCount = NoOfFields('$(vDqTableName)');
+
+	CALL _dqWrite('PROFILE', '$(vDqTableName)', '*', 'OK', 'Table has $(_dqRowCount) rows and $(_dqFieldCount) fields', $(_dqRowCount));
+	CALL logInfo('Data Quality: profiling $(vDqTableName) ($(_dqFieldCount) fields)');
+
+	FOR _dqFi = 1 TO $(_dqFieldCount)
+		LET _dqFieldName = FieldName($(_dqFi), '$(vDqTableName)');
+
+		// Count NULLs and distinct values via temporary table
+		_dq_profile_tmp:
+		LOAD count([$(_dqFieldName)]) AS _dq_non_null,
+			count(DISTINCT [$(_dqFieldName)]) AS _dq_distinct
+		RESIDENT [$(vDqTableName)];
+
+		LET _dqNonNull = peek('_dq_non_null', 0, '_dq_profile_tmp');
+		LET _dqDistinct = peek('_dq_distinct', 0, '_dq_profile_tmp');
+		LET _dqNullCount = $(_dqRowCount) - $(_dqNonNull);
+		LET _dqNullPct = if($(_dqRowCount) > 0, round($(_dqNullCount) / $(_dqRowCount) * 100, 0.1), 0);
+
+		DROP TABLE _dq_profile_tmp;
+
+		// Determine severity
+		IF $(_dqNullCount) = $(_dqRowCount) AND $(_dqRowCount) > 0 THEN
+			CALL _dqWrite('PROFILE', '$(vDqTableName)', '$(_dqFieldName)', 'ERROR', 'All values NULL ($(_dqRowCount) rows)', $(_dqNullCount));
+		ELSEIF $(_dqNullPct) > 50 THEN
+			CALL _dqWrite('PROFILE', '$(vDqTableName)', '$(_dqFieldName)', 'WARN', '$(_dqNullPct)% NULL ($(_dqNullCount) of $(_dqRowCount)). Distinct: $(_dqDistinct)', $(_dqNullCount));
+		ELSE
+			CALL _dqWrite('PROFILE', '$(vDqTableName)', '$(_dqFieldName)', 'OK', 'NULL: $(_dqNullCount) ($(_dqNullPct)%). Distinct: $(_dqDistinct)', $(_dqDistinct));
+		END IF
+	NEXT
+
+	LET _dqRowCount = null();
+	LET _dqFieldCount = null();
+	LET _dqFi = null();
+	LET _dqFieldName = null();
+	LET _dqNonNull = null();
+	LET _dqDistinct = null();
+	LET _dqNullCount = null();
+	LET _dqNullPct = null();
+	LET vDqTableName = null();
+
+end sub
+
+
+sub validateNotNull (vDqTableName, vDqFieldList)
+
+	// Validates that specified fields contain no NULL or empty values.
+	// vDqFieldList: comma-separated list of field names (e.g. 'OrderID, CustomerID')
+
+	LET _dqRowCount = NoOfRows('$(vDqTableName)');
+	LET _dqRemainingFields = '$(vDqFieldList)';
+
+	DO WHILE len('$(_dqRemainingFields)') > 0
+
+		// Extract next field name (split on comma)
+		LET _dqCommaPos = index('$(_dqRemainingFields)', ',');
+
+		IF $(_dqCommaPos) > 0 THEN
+			LET _dqCurrentField = trim(left('$(_dqRemainingFields)', $(_dqCommaPos) - 1));
+			LET _dqRemainingFields = trim(mid('$(_dqRemainingFields)', $(_dqCommaPos) + 1));
+		ELSE
+			LET _dqCurrentField = trim('$(_dqRemainingFields)');
+			LET _dqRemainingFields = '';
+		END IF
+
+		IF len('$(_dqCurrentField)') > 0 THEN
+
+			_dq_notnull_tmp:
+			LOAD count([$(_dqCurrentField)]) AS _dq_non_null
+			RESIDENT [$(vDqTableName)]
+			WHERE len(trim([$(_dqCurrentField)])) > 0;
+
+			LET _dqNonNull = peek('_dq_non_null', 0, '_dq_notnull_tmp');
+			LET _dqNullCount = $(_dqRowCount) - $(_dqNonNull);
+
+			DROP TABLE _dq_notnull_tmp;
+
+			IF $(_dqNullCount) > 0 THEN
+				CALL _dqWrite('NOT_NULL', '$(vDqTableName)', '$(_dqCurrentField)', 'ERROR', '$(_dqNullCount) NULL/empty values in mandatory field', $(_dqNullCount));
+			ELSE
+				CALL _dqWrite('NOT_NULL', '$(vDqTableName)', '$(_dqCurrentField)', 'OK', 'No NULL values', 0);
+			END IF
+
+		END IF
+
+	LOOP
+
+	LET _dqRowCount = null();
+	LET _dqRemainingFields = null();
+	LET _dqCommaPos = null();
+	LET _dqCurrentField = null();
+	LET _dqNonNull = null();
+	LET _dqNullCount = null();
+	LET vDqTableName = null();
+	LET vDqFieldList = null();
+
+end sub
+
+
+sub validateFK (vDqSrcTable, vDqSrcField, vDqTgtTable, vDqTgtField)
+
+	// Validates referential integrity: checks that all values in
+	// srcTable.srcField exist in tgtTable.tgtField.
+
+	// Build a mapping of valid target values
+	_dq_fk_map:
+	MAPPING LOAD DISTINCT [$(vDqTgtField)], 1
+	RESIDENT [$(vDqTgtTable)];
+
+	// Count orphans in source
+	_dq_fk_tmp:
+	LOAD count(DISTINCT [$(vDqSrcField)]) AS _dq_orphan_count
+	RESIDENT [$(vDqSrcTable)]
+	WHERE IsNull(ApplyMap('_dq_fk_map', [$(vDqSrcField)], null()));
+
+	LET _dqOrphanCount = peek('_dq_orphan_count', 0, '_dq_fk_tmp');
+	DROP TABLE _dq_fk_tmp;
+
+	IF $(_dqOrphanCount) > 0 THEN
+		CALL _dqWrite('FK', '$(vDqSrcTable)', '$(vDqSrcField)', 'ERROR', '$(_dqOrphanCount) distinct orphan values not found in $(vDqTgtTable).$(vDqTgtField)', $(_dqOrphanCount));
+	ELSE
+		CALL _dqWrite('FK', '$(vDqSrcTable)', '$(vDqSrcField)', 'OK', 'All values exist in $(vDqTgtTable).$(vDqTgtField)', 0);
+	END IF
+
+	LET _dqOrphanCount = null();
+	LET vDqSrcTable = null();
+	LET vDqSrcField = null();
+	LET vDqTgtTable = null();
+	LET vDqTgtField = null();
+
+end sub
+
+
+sub validateDateRange (vDqTableName, vDqDateField, vDqMinDate, vDqMaxDate)
+
+	// Validates that all dates in a field fall within an expected range.
+	// vDqMinDate/vDqMaxDate: date expressions, e.g. '2020-01-01' or MakeDate(2020,1,1)
+
+	_dq_date_tmp:
+	LOAD min([$(vDqDateField)]) AS _dq_min_date,
+		max([$(vDqDateField)]) AS _dq_max_date,
+		count([$(vDqDateField)]) AS _dq_date_count
+	RESIDENT [$(vDqTableName)]
+	WHERE NOT IsNull([$(vDqDateField)]);
+
+	LET _dqMinFound = peek('_dq_min_date', 0, '_dq_date_tmp');
+	LET _dqMaxFound = peek('_dq_max_date', 0, '_dq_date_tmp');
+	LET _dqDateCount = peek('_dq_date_count', 0, '_dq_date_tmp');
+	DROP TABLE _dq_date_tmp;
+
+	// Count out-of-range records
+	_dq_date_oor_tmp:
+	LOAD count([$(vDqDateField)]) AS _dq_oor_count
+	RESIDENT [$(vDqTableName)]
+	WHERE [$(vDqDateField)] < '$(vDqMinDate)' OR [$(vDqDateField)] > '$(vDqMaxDate)';
+
+	LET _dqOorCount = peek('_dq_oor_count', 0, '_dq_date_oor_tmp');
+	DROP TABLE _dq_date_oor_tmp;
+
+	IF $(_dqOorCount) > 0 THEN
+		CALL _dqWrite('DATE_RANGE', '$(vDqTableName)', '$(vDqDateField)', 'WARN', '$(_dqOorCount) dates outside range [$(vDqMinDate) - $(vDqMaxDate)]. Actual: [$(_dqMinFound) - $(_dqMaxFound)]', $(_dqOorCount));
+	ELSE
+		CALL _dqWrite('DATE_RANGE', '$(vDqTableName)', '$(vDqDateField)', 'OK', 'All $(_dqDateCount) dates within [$(vDqMinDate) - $(vDqMaxDate)]. Range: [$(_dqMinFound) - $(_dqMaxFound)]', 0);
+	END IF
+
+	LET _dqMinFound = null();
+	LET _dqMaxFound = null();
+	LET _dqDateCount = null();
+	LET _dqOorCount = null();
+	LET vDqTableName = null();
+	LET vDqDateField = null();
+	LET vDqMinDate = null();
+	LET vDqMaxDate = null();
+
+end sub
+
+
+sub validateUnique (vDqTableName, vDqKeyField)
+
+	// Validates that a field contains only unique values (primary key check).
+
+	LET _dqRowCount = NoOfRows('$(vDqTableName)');
+
+	_dq_unique_tmp:
+	LOAD count(DISTINCT [$(vDqKeyField)]) AS _dq_distinct
+	RESIDENT [$(vDqTableName)];
+
+	LET _dqDistinct = peek('_dq_distinct', 0, '_dq_unique_tmp');
+	LET _dqDuplicates = $(_dqRowCount) - $(_dqDistinct);
+	DROP TABLE _dq_unique_tmp;
+
+	IF $(_dqDuplicates) > 0 THEN
+		CALL _dqWrite('UNIQUE', '$(vDqTableName)', '$(vDqKeyField)', 'ERROR', '$(_dqDuplicates) duplicate rows ($(_dqDistinct) distinct of $(_dqRowCount) total)', $(_dqDuplicates));
+	ELSE
+		CALL _dqWrite('UNIQUE', '$(vDqTableName)', '$(vDqKeyField)', 'OK', 'All $(_dqRowCount) values are unique', 0);
+	END IF
+
+	LET _dqRowCount = null();
+	LET _dqDistinct = null();
+	LET _dqDuplicates = null();
+	LET vDqTableName = null();
+	LET vDqKeyField = null();
+
+end sub
+
+
+sub dqFinalize
+
+	LET _dqErrorCount = 0;
+	LET _dqWarnCount = 0;
+	LET _dqTotal = NoOfRows('_data_quality');
+
+	// Count errors and warnings
+	_dq_summary_tmp:
+	LOAD sum(if(dq_severity = 'ERROR', 1, 0)) AS _dq_errors,
+		sum(if(dq_severity = 'WARN', 1, 0)) AS _dq_warns
+	RESIDENT _data_quality;
+
+	LET _dqErrorCount = peek('_dq_errors', 0, '_dq_summary_tmp');
+	LET _dqWarnCount = peek('_dq_warns', 0, '_dq_summary_tmp');
+	DROP TABLE _dq_summary_tmp;
+
+	CALL logInfo('Data Quality: finalized - $(_dqTotal) checks: $(_dqErrorCount) errors, $(_dqWarnCount) warnings');
+
+	IF $(_dqErrorCount) > 0 THEN
+		CALL logError('Data Quality: $(_dqErrorCount) ERROR(s) detected - review _data_quality table');
+	END IF
+
+	LET _dqSeq = null();
+	LET _dqErrorCount = null();
+	LET _dqWarnCount = null();
+	LET _dqTotal = null();
+
+end sub
+
+
+// ============================================================
+// Example: Full data quality check after loading
+// ============================================================
+//
+// $(Include=lib://Scripts/logging.qvs);
+// $(Include=lib://Scripts/data_quality.qvs);
+//
+// CALL logInit('Sales Dashboard');
+//
+// // ... load tables ...
+//
+// // Data Quality
+// CALL dqInit;
+//
+// // Profile all fields
+// CALL profileTable('FactSales');
+// CALL profileTable('DimCustomer');
+//
+// // Mandatory fields
+// CALL validateNotNull('FactSales', 'SalesID, CustomerID, Amount, OrderDate');
+// CALL validateNotNull('DimCustomer', 'CustomerID, CustomerName');
+//
+// // Primary keys
+// CALL validateUnique('FactSales', 'SalesID');
+// CALL validateUnique('DimCustomer', 'CustomerID');
+//
+// // Foreign keys
+// CALL validateFK('FactSales', 'CustomerID', 'DimCustomer', 'CustomerID');
+// CALL validateFK('FactSales', 'ProductID', 'DimProduct', 'ProductID');
+//
+// // Date plausibility
+// CALL validateDateRange('FactSales', 'OrderDate', '2020-01-01', '2026-12-31');
+//
+// CALL dqFinalize;
+// CALL logFinalize;
