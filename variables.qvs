@@ -1,0 +1,220 @@
+// Variable Management for Qlik Sense
+//
+// Centralized variable and KPI management from external source files.
+// Supports loading from CSV/Excel and auto-generation of standard
+// Set Analysis variables for time-based comparisons.
+//
+// Usage:
+//   1. CALL varInit()
+//   2. CALL varLoadFromFile(filePath, fieldMap)    -- load from CSV/Excel
+//      and/or
+//      CALL varCreateSetAnalysis()                  -- generate time comparison vars
+//   3. CALL varApply()                              -- create all Qlik variables
+//   4. CALL varCleanup()
+//
+// The _variables table remains in the data model for documentation.
+//
+// Requires: logging.qvs (optional but recommended)
+// Depends on: calendar.qvs variables (vCalYear, vCalMonth, etc.) for
+//             Set Analysis generation when using varCreateSetAnalysis
+
+
+sub varInit
+
+	IF NOT IsNull(TableNumber('_variables')) THEN
+		DROP TABLE _variables;
+	END IF
+
+	_variables:
+	LOAD * INLINE [
+	var_name, var_definition, var_label, var_group, var_source
+	];
+
+	CALL logInfo('Variable Management: initialized');
+
+end sub
+
+
+sub varLoadFromFile (vVarFilePath, vVarNameField, vVarDefField, vVarLabelField, vVarGroupField)
+
+	// Load variable definitions from external file (CSV, Excel, QVD)
+	// Parameters:
+	//   vVarFilePath   - path to source file (lib://...)
+	//   vVarNameField  - column name for variable name
+	//   vVarDefField   - column name for variable definition/expression
+	//   vVarLabelField - column name for label/description (optional, use '' to skip)
+	//   vVarGroupField - column name for grouping (optional, use '' to skip)
+
+	_var_staging:
+	LOAD * FROM [$(vVarFilePath)]
+	(txt, codepage is 65001, embedded labels, delimiter is ';');
+
+	LET _varRowCount = NoOfRows('_var_staging');
+	CALL logInfo('Variable Management: loaded $(_varRowCount) definitions from $(vVarFilePath)');
+
+	// Map source columns to internal structure
+	LET _vLabelExpr = if(len('$(vVarLabelField)') > 0, '[$(vVarLabelField)]', '''');
+	LET _vGroupExpr = if(len('$(vVarGroupField)') > 0, '[$(vVarGroupField)]', '''');
+
+	Concatenate (_variables)
+	LOAD [$(vVarNameField)]   AS var_name,
+		[$(vVarDefField)]     AS var_definition,
+		$(_vLabelExpr)        AS var_label,
+		$(_vGroupExpr)        AS var_group,
+		'file'                AS var_source
+	RESIDENT _var_staging
+	WHERE len(trim([$(vVarNameField)])) > 0
+	  AND left([$(vVarNameField)], 2) <> '//';
+
+	DROP TABLE _var_staging;
+
+	LET _varRowCount = null();
+	LET _vLabelExpr = null();
+	LET _vGroupExpr = null();
+	LET vVarFilePath = null();
+	LET vVarNameField = null();
+	LET vVarDefField = null();
+	LET vVarLabelField = null();
+	LET vVarGroupField = null();
+
+end sub
+
+
+sub varAdd (vVarName, vVarDefinition, vVarLabel, vVarGroup)
+
+	// Add a single variable definition programmatically
+	Concatenate (_variables)
+	LOAD * INLINE [
+	var_name, var_definition, var_label, var_group, var_source
+	$(vVarName), $(vVarDefinition), $(vVarLabel), $(vVarGroup), script
+	];
+
+end sub
+
+
+sub varCreateSetAnalysis
+
+	// Generate standard Set Analysis variables for time-based comparisons.
+	// Uses the calendar field names from calendar.qvs (vCalYear, vCalMonth, etc.)
+	// These variables can be used directly in Qlik expressions.
+
+	LET _vYear  = if(len(vCalYear) > 0, vCalYear, 'year');
+	LET _vMonth = if(len(vCalMonthNo) > 0, vCalMonthNo, 'month_no');
+	LET _vYearMonth = if(len(vCalYearMonth) > 0, vCalYearMonth, 'year_month');
+	LET _vQuarter = if(len(vCalQuarter) > 0, vCalQuarter, 'quarter');
+
+	// Current Year / Previous Year
+	CALL varAdd('vCY', '=Year(Today())', 'Current Year', 'Set Analysis');
+	CALL varAdd('vPY', '=Year(Today())-1', 'Previous Year', 'Set Analysis');
+
+	// Current Month / Previous Month (as number)
+	CALL varAdd('vCM', '=Month(Today())', 'Current Month', 'Set Analysis');
+	CALL varAdd('vPM', '=Month(AddMonths(Today(),-1))', 'Previous Month', 'Set Analysis');
+
+	// Current Quarter
+	CALL varAdd('vCQ', '=''Q'' & Ceil(Month(Today())/3)', 'Current Quarter', 'Set Analysis');
+	CALL varAdd('vPQ', '=''Q'' & Ceil(Month(AddMonths(Today(),-3))/3)', 'Previous Quarter', 'Set Analysis');
+
+	// Current YearMonth / Previous YearMonth
+	CALL varAdd('vCYM', '=Date(MonthStart(Today()),''YYYY-MM'')', 'Current Year-Month', 'Set Analysis');
+	CALL varAdd('vPYM', '=Date(MonthStart(AddMonths(Today(),-1)),''YYYY-MM'')', 'Previous Year-Month', 'Set Analysis');
+
+	// Set Analysis selection strings (ready to use in {< >} blocks)
+	CALL varAdd('vSetCY', '=$(_vYear)={$(vCY)}', 'Set: Current Year', 'Set Analysis');
+	CALL varAdd('vSetPY', '=$(_vYear)={$(vPY)}', 'Set: Previous Year', 'Set Analysis');
+	CALL varAdd('vSetCM', '=$(_vYearMonth)={$(vCYM)}', 'Set: Current Month', 'Set Analysis');
+	CALL varAdd('vSetPM', '=$(_vYearMonth)={$(vPYM)}', 'Set: Previous Month', 'Set Analysis');
+	CALL varAdd('vSetYTD', '=YTD={1}', 'Set: Year to Date', 'Set Analysis');
+	CALL varAdd('vSetYTM', '=YTM={1}', 'Set: Year to Month', 'Set Analysis');
+	CALL varAdd('vSetLTM', '=LTM={1}', 'Set: Last 12 Months', 'Set Analysis');
+
+	// Comparison expressions (use with $(vKPI) pattern)
+	// Example: Sum({<$(vSetCY)>} Sales) vs Sum({<$(vSetPY)>} Sales)
+	CALL varAdd('vSetCY_YTD', '=$(_vYear)={$(vCY)},YTD={1}', 'Set: CY + YTD', 'Set Analysis');
+	CALL varAdd('vSetPY_YTD', '=$(_vYear)={$(vPY)},YTD={1}', 'Set: PY + YTD', 'Set Analysis');
+
+	CALL logInfo('Variable Management: Set Analysis variables generated');
+
+	LET _vYear = null();
+	LET _vMonth = null();
+	LET _vYearMonth = null();
+	LET _vQuarter = null();
+
+end sub
+
+
+sub varApply
+
+	// Create all Qlik variables from the _variables table
+	LET _varTotal = NoOfRows('_variables');
+	LET _varCreated = 0;
+
+	FOR _vi = 0 TO $(_varTotal) - 1
+		LET _varName = peek('var_name', $(_vi), '_variables');
+		LET _varDef  = peek('var_definition', $(_vi), '_variables');
+
+		IF len('$(_varName)') > 0 THEN
+			LET [$(_varName)] = '$(_varDef)';
+			LET _varCreated = $(_varCreated) + 1;
+		END IF
+	NEXT
+
+	CALL logInfo('Variable Management: $(_varCreated) of $(_varTotal) variables applied');
+
+	LET _varTotal = null();
+	LET _varCreated = null();
+	LET _vi = null();
+	LET _varName = null();
+	LET _varDef = null();
+
+end sub
+
+
+sub varCleanup
+
+	// Note: _variables table is kept for documentation in the data model
+	CALL logInfo('Variable Management: cleanup (keeping _variables table for documentation)');
+
+end sub
+
+
+// ============================================================
+// Example: CSV file format (semicolon-separated)
+// ============================================================
+//
+// var_name;var_definition;var_label;var_group
+// vSales;Sum(Sales);Umsatz;KPI
+// vMargin;Sum(Margin)/Sum(Sales);Marge %;KPI
+// vOrderCount;Count(DISTINCT OrderID);Anzahl Aufträge;KPI
+// vAvgOrderValue;Sum(Sales)/Count(DISTINCT OrderID);Ø Auftragswert;KPI
+
+
+// ============================================================
+// Example: Full usage with file + Set Analysis
+// ============================================================
+//
+// $(Include=lib://Scripts/logging.qvs);
+// $(Include=lib://Scripts/calendar.qvs);
+// $(Include=lib://Scripts/variables.qvs);
+//
+// CALL logInit('Sales Dashboard');
+//
+// // Calendar first (sets vCalYear etc. needed for Set Analysis)
+// CALL startCalendarService;
+// CALL generateCalendar;
+//
+// // Variables
+// CALL varInit;
+// CALL varLoadFromFile('lib://Config/variables.csv', 'var_name', 'var_definition', 'var_label', 'var_group');
+// CALL varCreateSetAnalysis;
+// CALL varApply;
+// CALL varCleanup;
+//
+// CALL stopCalendarService;
+// CALL logFinalize;
+//
+// // Now use in expressions:
+// // Sum({<$(vSetCY)>} Sales)           -> Sales current year
+// // Sum({<$(vSetPY)>} Sales)           -> Sales previous year
+// // Sum({<$(vSetCY_YTD)>} Sales)       -> Sales CY year-to-date
+// // Sum({<$(vSetPY_YTD)>} Sales)       -> Sales PY year-to-date
