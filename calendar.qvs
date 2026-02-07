@@ -100,7 +100,7 @@ sub generateCalendar (vCalendarQualifier)
 		if (WeekDay(datefield) < 5, 1, 0) AS $(vCalendarQualifier)$(vCalWorkday),
 		if (WeekDay(datefield) >= 5, 1, 0) AS $(vCalendarQualifier)$(vCalWeekend), 
 		Today()- datefield AS $(vCalendarQualifier)$(vCalDaysAgo),
-		floor((Today() - datefield) / 7) AS $(vCalendarQualifier)$(vCalWeeksAgo),
+		floor((WeekStart(today()) - WeekStart(datefield)) / 7) AS $(vCalendarQualifier)$(vCalWeeksAgo),
 		12 * (Year(Today()) - Year(datefield)) + Month(Today()) - Month(datefield) AS $(vCalendarQualifier)$(vCalMonthsAgo),
 		date(datefield, '$(DateFormat)') AS $(vCalendarQualifier)$(vCalTimeRangeID), 
 		// Business / Fiscal Year
