@@ -8,6 +8,7 @@ Wiederverwendbare QVS-Routinen für Qlik Sense Ladescripte.
 |-------|-------------|
 | `calendar.qvs` | Kalender-Generierung mit Mehrsprachigkeit, Fiskaljahr, TimeRanges |
 | `logging.qvs` | Strukturiertes Logging mit Severity-Levels und Zeitmessung |
+| `incremental_load.qvs` | Inkrementelles Laden mit QVD-Watermarking (Upsert / Append) |
 
 ---
 
@@ -226,3 +227,147 @@ CALL logRowCount('DimCustomer');
 CALL logExport('lib://QVD/logs/load_log.qvd');
 CALL logFinalize;
 ```
+
+---
+
+## incremental_load.qvs — Inkrementelles Laden
+
+Wiederverwendbares Framework für Delta-Laden mit QVD-Watermarking. Unterstützt zwei Merge-Strategien: **Upsert** (Insert/Update per Primärschlüssel) und **Append** (nur neue Datensätze anhängen).
+
+### Ablauf
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌─────────────┐
+│  incrInit    │────>│  User LOAD   │────>│  incrMerge   │────>│  incrStore   │
+│              │     │  (Delta/Full)│     │              │     │              │
+│ Prüft QVD   │     │ Nutzt        │     │ QVD + Delta  │     │ Speichert    │
+│ Setzt Mode  │     │ vIncrWatermark│    │ zusammen-    │     │ nach QVD     │
+│ + Watermark │     │ in WHERE     │     │ führen       │     │              │
+└─────────────┘     └──────────────┘     └─────────────┘     └─────────────┘
+```
+
+### Variablen (automatisch gesetzt)
+
+| Variable | Beschreibung |
+|----------|-------------|
+| `vIncrMode` | `'FULL'` oder `'DELTA'` — wird von `incrInit` gesetzt |
+| `vIncrWatermark` | Max-Wert des Timestamp-Felds aus dem QVD (leer bei FULL) |
+| `vIncrForceReload` | Auf `1` setzen **vor** `incrInit` um Full Reload zu erzwingen |
+
+### Subroutinen
+
+#### `incrInit (qvdPath, timestampField)`
+
+Prüft ob das QVD existiert. Wenn ja, wird der maximale Wert des Timestamp-Felds als Watermark gelesen und `vIncrMode = 'DELTA'` gesetzt. Wenn nein (oder `vIncrForceReload = 1`), wird `vIncrMode = 'FULL'` gesetzt.
+
+```qlik
+CALL incrInit('lib://QVD/FactSales.qvd', 'ModifiedDate');
+// vIncrMode = 'DELTA', vIncrWatermark = '2024-06-15 14:30:00'
+```
+
+#### `incrMerge (tableName, qvdPath, primaryKey)`
+
+Führt die geladene Staging-Tabelle mit den bestehenden QVD-Daten zusammen.
+
+- **Mit Primärschlüssel** (Upsert): Lädt QVD mit `WHERE NOT EXISTS(primaryKey)` — aktualisierte Datensätze werden durch die Delta-Version ersetzt.
+- **Ohne Primärschlüssel** (Append): Lädt das gesamte QVD und hängt es an die Delta-Tabelle an.
+- **Bei FULL-Modus**: Kein Merge nötig, Tabelle enthält bereits alles.
+
+```qlik
+CALL incrMerge('FactSales', 'lib://QVD/FactSales.qvd', 'SalesID');   // Upsert
+CALL incrMerge('EventLog', 'lib://QVD/EventLog.qvd', '');             // Append
+```
+
+| Parameter | Beschreibung |
+|-----------|-------------|
+| `tableName` | Name der Staging-Tabelle (wird zur finalen Tabelle) |
+| `qvdPath` | Pfad zum bestehenden QVD |
+| `primaryKey` | Feld für Deduplizierung (leer = Append-Modus) |
+
+#### `incrStore (tableName, qvdPath)`
+
+Speichert die Tabelle als QVD.
+
+```qlik
+CALL incrStore('FactSales', 'lib://QVD/FactSales.qvd');
+```
+
+#### `incrCleanup`
+
+Räumt alle Incremental-Load-Variablen auf.
+
+```qlik
+CALL incrCleanup;
+```
+
+### Beispiel 1: Upsert (Insert + Update)
+
+Für Tabellen mit Primärschlüssel, bei denen bestehende Datensätze aktualisiert werden können.
+
+```qlik
+$(Include=lib://Scripts/logging.qvs);
+$(Include=lib://Scripts/incremental_load.qvs);
+
+CALL logInit('Sales ETL');
+
+// 1. Init: prüft QVD, setzt Watermark
+CALL incrInit('lib://QVD/FactSales.qvd', 'ModifiedDate');
+
+// 2. Delta laden (bei FULL ist vIncrWatermark leer -> WHERE ignoriert)
+CALL logStartTimer('Load FactSales');
+FactSales:
+SQL SELECT SalesID, CustomerID, Amount, OrderDate, ModifiedDate
+FROM dbo.Sales
+WHERE ModifiedDate >= '$(vIncrWatermark)';
+CALL logStopTimer('Load FactSales');
+
+// 3. Merge: QVD + Delta zusammenführen (Upsert auf SalesID)
+CALL incrMerge('FactSales', 'lib://QVD/FactSales.qvd', 'SalesID');
+
+// 4. Speichern
+CALL incrStore('FactSales', 'lib://QVD/FactSales.qvd');
+CALL incrCleanup;
+
+CALL logFinalize;
+```
+
+### Beispiel 2: Append-only (Log-Daten)
+
+Für Tabellen ohne Updates — neue Datensätze werden nur angehängt.
+
+```qlik
+CALL incrInit('lib://QVD/EventLog.qvd', 'EventTimestamp');
+
+EventLog:
+SQL SELECT *
+FROM dbo.EventLog
+WHERE EventTimestamp > '$(vIncrWatermark)';
+// Wichtig: > statt >= um Duplikate zu vermeiden (kein PK für Deduplizierung)
+
+CALL incrMerge('EventLog', 'lib://QVD/EventLog.qvd', '');
+CALL incrStore('EventLog', 'lib://QVD/EventLog.qvd');
+CALL incrCleanup;
+```
+
+### Beispiel 3: Force Full Reload
+
+```qlik
+LET vIncrForceReload = 1;
+CALL incrInit('lib://QVD/FactSales.qvd', 'ModifiedDate');
+// vIncrMode ist jetzt 'FULL', unabhängig ob QVD existiert
+
+FactSales:
+SQL SELECT * FROM dbo.Sales;
+
+// Kein Merge nötig bei FULL, aber Aufruf schadet nicht
+CALL incrMerge('FactSales', 'lib://QVD/FactSales.qvd', 'SalesID');
+CALL incrStore('FactSales', 'lib://QVD/FactSales.qvd');
+CALL incrCleanup;
+```
+
+### Hinweis: WHERE-Klausel bei Delta
+
+| Strategie | WHERE-Bedingung | Grund |
+|-----------|----------------|-------|
+| Upsert | `>= '$(vIncrWatermark)'` | Geänderte Datensätze zum gleichen Zeitpunkt werden per PK dedupliziert |
+| Append | `> '$(vIncrWatermark)'` | Ohne PK muss der Watermark-Datensatz selbst ausgeschlossen werden |

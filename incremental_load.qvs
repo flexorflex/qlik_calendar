@@ -1,0 +1,160 @@
+// Incremental Load Framework for Qlik Sense
+//
+// Provides a reusable pattern for delta loading with QVD watermarking.
+// Supports two merge strategies:
+//   - Upsert: delta replaces existing records by primary key (insert/update)
+//   - Append: delta is added without deduplication (insert-only)
+//
+// Usage pattern:
+//   1. CALL incrInit(qvdPath, timestampField)
+//      -> sets vIncrMode ('FULL' or 'DELTA') and vIncrWatermark
+//   2. Load your delta data into a staging table (use vIncrWatermark in WHERE)
+//   3. CALL incrMerge(tableName, qvdPath, primaryKey)
+//      -> merges QVD with staging table
+//   4. CALL incrStore(tableName, qvdPath)
+//      -> stores result back to QVD
+//   5. CALL incrCleanup
+//
+// Set vIncrForceReload = 1 before incrInit to force a full reload.
+//
+// Requires: logging.qvs (optional but recommended)
+
+
+sub incrInit (vIncrQvdPath, vIncrTimestampField)
+
+	LET vIncrWatermark = null();
+	LET vIncrQvdRows = QvdNoOfRecords('$(vIncrQvdPath)');
+
+	IF vIncrQvdRows < 0 OR vIncrForceReload = 1 THEN
+
+		// QVD does not exist or force reload requested
+		LET vIncrMode = 'FULL';
+		CALL logInfo('Incremental: FULL load (QVD not found or force reload)');
+
+	ELSE
+
+		// QVD exists -> read watermark from timestamp field
+		LET vIncrMode = 'DELTA';
+
+		_incr_watermark:
+		LOAD max([$(vIncrTimestampField)]) AS _incr_max_ts
+		FROM [$(vIncrQvdPath)] (qvd);
+
+		LET vIncrWatermark = peek('_incr_max_ts', 0, '_incr_watermark');
+		DROP TABLE _incr_watermark;
+
+		CALL logInfo('Incremental: DELTA load from watermark $(vIncrWatermark) ($(vIncrQvdRows) existing rows)');
+
+	END IF
+
+	LET vIncrQvdRows = null();
+
+end sub
+
+
+sub incrMerge (vIncrTableName, vIncrQvdPath, vIncrPrimaryKey)
+
+	IF vIncrMode = 'DELTA' THEN
+
+		LET _incrDeltaRows = NoOfRows('$(vIncrTableName)');
+		CALL logInfo('Incremental: merging $(_incrDeltaRows) delta rows into $(vIncrTableName)');
+
+		IF len('$(vIncrPrimaryKey)') > 0 THEN
+
+			// Upsert: concatenate QVD, skip records that exist in delta
+			Concatenate ([$(vIncrTableName)])
+			LOAD *
+			FROM [$(vIncrQvdPath)] (qvd)
+			WHERE NOT EXISTS ([$(vIncrPrimaryKey)]);
+
+			CALL logInfo('Incremental: upsert merge on key [$(vIncrPrimaryKey)] completed');
+
+		ELSE
+
+			// Append-only: just concatenate all QVD records
+			Concatenate ([$(vIncrTableName)])
+			LOAD *
+			FROM [$(vIncrQvdPath)] (qvd);
+
+			CALL logInfo('Incremental: append merge completed');
+
+		END IF
+
+		LET _incrTotalRows = NoOfRows('$(vIncrTableName)');
+		CALL logInfo('Incremental: $(vIncrTableName) now has $(_incrTotalRows) total rows');
+		LET _incrDeltaRows = null();
+		LET _incrTotalRows = null();
+
+	ELSE
+
+		// Full load: table already contains all data
+		CALL logInfo('Incremental: full load - no merge needed ($(vIncrTableName) has ' & NoOfRows('$(vIncrTableName)') & ' rows)');
+
+	END IF
+
+end sub
+
+
+sub incrStore (vIncrTableName, vIncrQvdPath)
+
+	STORE [$(vIncrTableName)] INTO [$(vIncrQvdPath)] (qvd);
+	CALL logInfo('Incremental: stored $(vIncrTableName) to $(vIncrQvdPath)');
+
+end sub
+
+
+sub incrCleanup
+
+	LET vIncrMode = null();
+	LET vIncrWatermark = null();
+	LET vIncrForceReload = null();
+	LET vIncrQvdPath = null();
+	LET vIncrTimestampField = null();
+	LET vIncrTableName = null();
+	LET vIncrPrimaryKey = null();
+
+end sub
+
+
+// ============================================================
+// Example: Upsert pattern (insert + update by primary key)
+// ============================================================
+//
+// CALL incrInit('lib://QVD/FactSales.qvd', 'ModifiedDate');
+//
+// FactSales:
+// SQL SELECT *
+// FROM dbo.Sales
+// WHERE ModifiedDate >= '$(vIncrWatermark)';
+// // On FULL load vIncrWatermark is empty -> loads all
+// // On DELTA load -> loads only changed records
+//
+// CALL incrMerge('FactSales', 'lib://QVD/FactSales.qvd', 'SalesID');
+// CALL incrStore('FactSales', 'lib://QVD/FactSales.qvd');
+// CALL incrCleanup;
+
+
+// ============================================================
+// Example: Append-only pattern (no primary key, log-style data)
+// ============================================================
+//
+// CALL incrInit('lib://QVD/EventLog.qvd', 'EventTimestamp');
+//
+// EventLog:
+// SQL SELECT *
+// FROM dbo.EventLog
+// WHERE EventTimestamp > '$(vIncrWatermark)';
+// // Use > instead of >= for append-only to avoid duplicates
+//
+// CALL incrMerge('EventLog', 'lib://QVD/EventLog.qvd', '');
+// CALL incrStore('EventLog', 'lib://QVD/EventLog.qvd');
+// CALL incrCleanup;
+
+
+// ============================================================
+// Example: Force full reload
+// ============================================================
+//
+// LET vIncrForceReload = 1;
+// CALL incrInit('lib://QVD/FactSales.qvd', 'ModifiedDate');
+// // vIncrMode is now 'FULL' regardless of QVD existence
