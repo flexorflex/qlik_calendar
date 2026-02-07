@@ -9,6 +9,7 @@ Wiederverwendbare QVS-Routinen für Qlik Sense Ladescripte.
 | `calendar.qvs` | Kalender-Generierung mit Mehrsprachigkeit, Fiskaljahr, TimeRanges |
 | `logging.qvs` | Strukturiertes Logging mit Severity-Levels und Zeitmessung |
 | `incremental_load.qvs` | Inkrementelles Laden mit QVD-Watermarking (Upsert / Append) |
+| `variables.qvs` | Zentrale Variablen-/KPI-Verwaltung mit Set-Analysis-Generator |
 
 ---
 
@@ -371,3 +372,151 @@ CALL incrCleanup;
 |-----------|----------------|-------|
 | Upsert | `>= '$(vIncrWatermark)'` | Geänderte Datensätze zum gleichen Zeitpunkt werden per PK dedupliziert |
 | Append | `> '$(vIncrWatermark)'` | Ohne PK muss der Watermark-Datensatz selbst ausgeschlossen werden |
+
+---
+
+## variables.qvs — Variable Management
+
+Zentrale Verwaltung von KPI-Definitionen und Set-Analysis-Variablen. Variablen werden aus einer externen Datei (CSV/Excel) geladen und/oder automatisch für Zeitvergleiche generiert. Die `_variables`-Tabelle bleibt im Datenmodell als lebende Dokumentation.
+
+### Ablauf
+
+```
+┌───────────┐     ┌─────────────────┐     ┌─────────────────────┐     ┌───────────┐
+│  varInit   │────>│ varLoadFromFile │────>│ varCreateSetAnalysis │────>│ varApply   │
+│            │     │ (aus CSV/Excel) │     │ (Zeitvergleiche)     │     │           │
+│ Tabelle    │     │                 │     │                      │     │ Erstellt   │
+│ anlegen    │     │ Optional        │     │ Optional             │     │ LET-Vars  │
+└───────────┘     └─────────────────┘     └─────────────────────┘     └───────────┘
+```
+
+### Subroutinen
+
+#### `varInit`
+
+Initialisiert die interne `_variables`-Tabelle. Muss als erstes aufgerufen werden.
+
+```qlik
+CALL varInit;
+```
+
+#### `varLoadFromFile (filePath, nameField, defField, labelField, groupField)`
+
+Lädt Variablen-Definitionen aus einer externen CSV-Datei (Semikolon-separiert).
+
+```qlik
+CALL varLoadFromFile('lib://Config/variables.csv', 'var_name', 'var_definition', 'var_label', 'var_group');
+```
+
+| Parameter | Beschreibung |
+|-----------|-------------|
+| `filePath` | Pfad zur Quelldatei (`lib://...`) |
+| `nameField` | Spalte mit dem Variablennamen |
+| `defField` | Spalte mit der Formel/Definition |
+| `labelField` | Spalte mit dem Label (oder `''` zum Überspringen) |
+| `groupField` | Spalte mit der Gruppe (oder `''` zum Überspringen) |
+
+**CSV-Format (Semikolon-separiert, UTF-8):**
+
+```csv
+var_name;var_definition;var_label;var_group
+vSales;Sum(Sales);Umsatz;KPI
+vMargin;Sum(Margin)/Sum(Sales);Marge %;KPI
+vOrderCount;Count(DISTINCT OrderID);Anzahl Aufträge;KPI
+vAvgOrderValue;Sum(Sales)/Count(DISTINCT OrderID);Ø Auftragswert;KPI
+```
+
+Zeilen, die mit `//` beginnen, werden als Kommentare ignoriert.
+
+#### `varAdd (name, definition, label, group)`
+
+Fügt eine einzelne Variable programmatisch hinzu (ohne externe Datei).
+
+```qlik
+CALL varAdd('vCustomerCount', 'Count(DISTINCT CustomerID)', 'Anzahl Kunden', 'KPI');
+```
+
+#### `varCreateSetAnalysis`
+
+Generiert Standard-Variablen für Zeitvergleiche. Nutzt die Feldnamen aus `calendar.qvs` (falls geladen).
+
+**Generierte Variablen:**
+
+| Variable | Definition | Beschreibung |
+|----------|-----------|-------------|
+| `vCY` | `Year(Today())` | Aktuelles Jahr |
+| `vPY` | `Year(Today())-1` | Vorjahr |
+| `vCM` | `Month(Today())` | Aktueller Monat |
+| `vPM` | `Month(AddMonths(Today(),-1))` | Vormonat |
+| `vCQ` | `'Q' & Ceil(Month(Today())/3)` | Aktuelles Quartal |
+| `vPQ` | `'Q' & Ceil(...)` | Vorquartal |
+| `vCYM` | `Date(MonthStart(Today()),'YYYY-MM')` | Aktueller Jahr-Monat |
+| `vPYM` | `Date(MonthStart(...),'YYYY-MM')` | Vorheriger Jahr-Monat |
+
+**Set-Analysis-Selektionen (für `{< >}` Blöcke):**
+
+| Variable | Ergebnis | Verwendung |
+|----------|---------|-----------|
+| `vSetCY` | `year={$(vCY)}` | `Sum({<$(vSetCY)>} Sales)` |
+| `vSetPY` | `year={$(vPY)}` | `Sum({<$(vSetPY)>} Sales)` |
+| `vSetCM` | `year_month={$(vCYM)}` | `Sum({<$(vSetCM)>} Sales)` |
+| `vSetPM` | `year_month={$(vPYM)}` | `Sum({<$(vSetPM)>} Sales)` |
+| `vSetYTD` | `YTD={1}` | `Sum({<$(vSetYTD)>} Sales)` |
+| `vSetYTM` | `YTM={1}` | `Sum({<$(vSetYTM)>} Sales)` |
+| `vSetLTM` | `LTM={1}` | `Sum({<$(vSetLTM)>} Sales)` |
+| `vSetCY_YTD` | `year={$(vCY)},YTD={1}` | CY + Year-to-Date |
+| `vSetPY_YTD` | `year={$(vPY)},YTD={1}` | PY + Year-to-Date |
+
+#### `varApply`
+
+Erstellt alle geladenen Variablen als Qlik-Variablen (`LET`). Muss nach `varLoadFromFile` und/oder `varCreateSetAnalysis` aufgerufen werden.
+
+```qlik
+CALL varApply;
+// -> [INFO] Variable Management: 25 of 25 variables applied
+```
+
+#### `varCleanup`
+
+Abschluss-Routine. Die `_variables`-Tabelle bleibt im Datenmodell erhalten — sie dient als Dokumentation aller definierten Variablen im Dashboard.
+
+### Vollständiges Beispiel
+
+```qlik
+$(Include=lib://Scripts/logging.qvs);
+$(Include=lib://Scripts/calendar.qvs);
+$(Include=lib://Scripts/variables.qvs);
+
+CALL logInit('Sales Dashboard');
+
+// 1. Kalender (setzt Feldnamen für Set Analysis)
+CALL startCalendarService;
+CALL generateCalendar;
+
+// 2. Variablen
+CALL varInit;
+CALL varLoadFromFile('lib://Config/kpis.csv', 'var_name', 'var_definition', 'var_label', 'var_group');
+CALL varCreateSetAnalysis;
+CALL varApply;
+CALL varCleanup;
+
+CALL stopCalendarService;
+CALL logFinalize;
+```
+
+### Verwendung in Qlik Expressions
+
+```qlik
+// KPIs aus CSV
+= $(vSales)                                      // -> Sum(Sales)
+= $(vMargin)                                     // -> Sum(Margin)/Sum(Sales)
+
+// Zeitvergleiche mit Set Analysis
+= Sum({<$(vSetCY)>} Sales)                       // Umsatz aktuelles Jahr
+= Sum({<$(vSetPY)>} Sales)                       // Umsatz Vorjahr
+= Sum({<$(vSetCY_YTD)>} Sales)                   // Umsatz CY Year-to-Date
+= Sum({<$(vSetCY)>} Sales) - Sum({<$(vSetPY)>} Sales)   // Differenz CY vs PY
+
+// Kombiniert: KPI + Zeitraum
+= $(vSales) & ' (CY: ' & Sum({<$(vSetCY)>} Sales) & ')'
+```
