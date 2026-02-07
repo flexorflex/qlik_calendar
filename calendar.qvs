@@ -43,6 +43,7 @@ sub startCalendarService
 	Workday, Arbeitstag, workday
 	Weekend, Wochenende, weekend
 	DaysAgo, Tage_vergangen, days_ago
+	WeeksAgo, Wochen_vergangen, weeks_ago
 	MonthsAgo, Monate_vergangen, months_ago
 	FYear, Fiskaljahr, fiscal_year
 	FQuarter, Fiskalquartal, fiscal_quarter		
@@ -99,7 +100,8 @@ sub generateCalendar (vCalendarQualifier)
 		if (WeekDay(datefield) < 5, 1, 0) AS $(vCalendarQualifier)$(vCalWorkday),
 		if (WeekDay(datefield) >= 5, 1, 0) AS $(vCalendarQualifier)$(vCalWeekend), 
 		Today()- datefield AS $(vCalendarQualifier)$(vCalDaysAgo),
-		12 * (Year(Today()) - Year(datefield)) + Month(Today()) - Month(datefield) AS $(vCalendarQualifier)$(vCalMonthsAgo), 
+		floor((Today() - datefield) / 7) AS $(vCalendarQualifier)$(vCalWeeksAgo),
+		12 * (Year(Today()) - Year(datefield)) + Month(Today()) - Month(datefield) AS $(vCalendarQualifier)$(vCalMonthsAgo),
 		date(datefield, '$(DateFormat)') AS $(vCalendarQualifier)$(vCalTimeRangeID), 
 		// Business / Fiscal Year
 		year(datefield) + if ($(vFirstMonth) > 1 AND month(datefield) >= $(vFirstMonth), 1, 0) AS $(vCalendarQualifier)$(vCalFYear),
