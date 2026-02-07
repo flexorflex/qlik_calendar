@@ -10,6 +10,7 @@ Wiederverwendbare QVS-Routinen für Qlik Sense Ladescripte.
 | `logging.qvs` | Strukturiertes Logging mit Severity-Levels und Zeitmessung |
 | `incremental_load.qvs` | Inkrementelles Laden mit QVD-Watermarking (Upsert / Append) |
 | `variables.qvs` | Zentrale Variablen-/KPI-Verwaltung mit Set-Analysis-Generator |
+| `data_quality.qvs` | Automatische Datenqualitätsprüfung (Profiling, NULLs, FK, Duplikate) |
 
 ---
 
@@ -520,3 +521,162 @@ CALL logFinalize;
 // Kombiniert: KPI + Zeitraum
 = $(vSales) & ' (CY: ' & Sum({<$(vSetCY)>} Sales) & ')'
 ```
+
+---
+
+## data_quality.qvs — Datenqualitäts-Framework
+
+Automatische Datenqualitätsprüfung nach dem Laden. Alle Ergebnisse werden in einer `_data_quality`-Tabelle gesammelt, die im Datenmodell für QA-Dashboards verbleibt.
+
+### Verfügbare Checks
+
+| Check | Subroutine | Prüft |
+|-------|-----------|-------|
+| **Profiling** | `profileTable` | NULL-Anteil und Distinct-Count pro Feld |
+| **Pflichtfelder** | `validateNotNull` | Keine NULL/leeren Werte in definierten Feldern |
+| **Primärschlüssel** | `validateUnique` | Eindeutigkeit eines Schlüsselfelds |
+| **Fremdschlüssel** | `validateFK` | Referentielle Integrität zwischen Tabellen |
+| **Datumsbereich** | `validateDateRange` | Datumswerte innerhalb eines erwarteten Bereichs |
+
+### Severity-Levels
+
+| Level | Bedeutung |
+|-------|-----------|
+| `OK` | Check bestanden |
+| `WARN` | Auffälligkeit, aber kein Blocker (z.B. >50% NULLs) |
+| `ERROR` | Datenqualitätsproblem (z.B. Pflichtfeld NULL, Orphan-FKs, Duplikate) |
+
+### Subroutinen
+
+#### `dqInit`
+
+Initialisiert die `_data_quality`-Ergebnistabelle.
+
+```qlik
+CALL dqInit;
+```
+
+#### `profileTable (tableName)`
+
+Erstellt ein Profil aller Felder einer Tabelle: Zeilenanzahl, NULL-Anteil (absolut + prozentual), Distinct-Count pro Feld.
+
+```qlik
+CALL profileTable('FactSales');
+```
+
+Severity-Regeln:
+- `ERROR` — 100% NULL (alle Werte leer)
+- `WARN` — >50% NULL
+- `OK` — alles andere
+
+#### `validateNotNull (tableName, fieldList)`
+
+Prüft, dass angegebene Pflichtfelder keine NULL- oder Leer-Werte enthalten. `fieldList` ist kommagetrennt.
+
+```qlik
+CALL validateNotNull('FactSales', 'SalesID, CustomerID, Amount, OrderDate');
+```
+
+#### `validateUnique (tableName, keyField)`
+
+Prüft, ob ein Feld nur eindeutige Werte enthält (Primärschlüssel-Check).
+
+```qlik
+CALL validateUnique('FactSales', 'SalesID');
+// -> ERROR: 47 duplicate rows (99953 distinct of 100000 total)
+// -> OK: All 100000 values are unique
+```
+
+#### `validateFK (srcTable, srcField, tgtTable, tgtField)`
+
+Prüft referentielle Integrität: Existieren alle Werte aus `srcField` auch in `tgtField`?
+
+```qlik
+CALL validateFK('FactSales', 'CustomerID', 'DimCustomer', 'CustomerID');
+// -> ERROR: 5 distinct orphan values not found in DimCustomer.CustomerID
+// -> OK: All values exist in DimCustomer.CustomerID
+```
+
+| Parameter | Beschreibung |
+|-----------|-------------|
+| `srcTable` | Quell-Tabelle (mit Fremdschlüssel) |
+| `srcField` | Fremdschlüsselfeld |
+| `tgtTable` | Ziel-Tabelle (mit Primärschlüssel) |
+| `tgtField` | Referenziertes Feld in der Zieltabelle |
+
+#### `validateDateRange (tableName, dateField, minDate, maxDate)`
+
+Prüft, ob alle Datumswerte innerhalb eines erwarteten Bereichs liegen.
+
+```qlik
+CALL validateDateRange('FactSales', 'OrderDate', '2020-01-01', '2026-12-31');
+// -> WARN: 23 dates outside range [2020-01-01 - 2026-12-31]. Actual: [2019-11-03 - 2027-01-15]
+// -> OK: All 100000 dates within [2020-01-01 - 2026-12-31]
+```
+
+#### `dqFinalize`
+
+Zählt Errors und Warnings zusammen, loggt eine Zusammenfassung. Bei Errors wird ein `logError` erzeugt.
+
+```qlik
+CALL dqFinalize;
+// -> [INFO] Data Quality: finalized - 42 checks: 2 errors, 5 warnings
+// -> [ERROR] Data Quality: 2 ERROR(s) detected - review _data_quality table
+```
+
+### Ergebnis-Tabelle `_data_quality`
+
+| Spalte | Typ | Beschreibung |
+|--------|-----|-------------|
+| `dq_seq` | Integer | Laufende Nummer |
+| `dq_timestamp` | Timestamp | Zeitpunkt des Checks |
+| `dq_check` | String | Check-Typ: `PROFILE`, `NOT_NULL`, `UNIQUE`, `FK`, `DATE_RANGE` |
+| `dq_table` | String | Geprüfte Tabelle |
+| `dq_field` | String | Geprüftes Feld |
+| `dq_severity` | String | `OK`, `WARN` oder `ERROR` |
+| `dq_message` | String | Detaillierte Beschreibung |
+| `dq_value` | Number | Kennzahl (z.B. Anzahl NULLs, Duplikate, Orphans) |
+
+### Vollständiges Beispiel
+
+```qlik
+$(Include=lib://Scripts/logging.qvs);
+$(Include=lib://Scripts/data_quality.qvs);
+
+CALL logInit('Sales Dashboard');
+
+// ... Tabellen laden ...
+
+// Data Quality Checks
+CALL dqInit;
+
+// Profiling
+CALL profileTable('FactSales');
+CALL profileTable('DimCustomer');
+
+// Pflichtfelder
+CALL validateNotNull('FactSales', 'SalesID, CustomerID, Amount, OrderDate');
+CALL validateNotNull('DimCustomer', 'CustomerID, CustomerName');
+
+// Primärschlüssel
+CALL validateUnique('FactSales', 'SalesID');
+CALL validateUnique('DimCustomer', 'CustomerID');
+
+// Fremdschlüssel
+CALL validateFK('FactSales', 'CustomerID', 'DimCustomer', 'CustomerID');
+CALL validateFK('FactSales', 'ProductID', 'DimProduct', 'ProductID');
+
+// Datumsbereiche
+CALL validateDateRange('FactSales', 'OrderDate', '2020-01-01', '2026-12-31');
+
+CALL dqFinalize;
+CALL logFinalize;
+```
+
+### QA-Dashboard
+
+Die `_data_quality`-Tabelle kann direkt in einem Qlik Sheet visualisiert werden:
+
+- **Tabelle** mit `dq_severity` als Farbindikator (OK=grün, WARN=gelb, ERROR=rot)
+- **KPI** mit `Count({<dq_severity={'ERROR'}>} dq_seq)` für Error-Count
+- **Filter** auf `dq_check` und `dq_table` für gezieltes Drilling
