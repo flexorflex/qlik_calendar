@@ -250,7 +250,7 @@ end sub
 // $(Include=lib://Scripts/time_dimension.qvs);
 //
 // SET vDataModelLanguage = 'DE';
-// CALL logInit('Mein Dashboard');
+// CALL logInit('My Dashboard');
 // CALL generateTimeDimension;
 // CALL cleanupTimeDimension;
 // CALL logFinalize;
