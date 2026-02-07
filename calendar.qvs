@@ -12,15 +12,13 @@
 
 sub startCalendarService
 
-	if (isNull(vCalendarFM) OR (vCalendarFM < 1 and vCalendarFM > 12)) then 
+	if (isNull(vCalendarFM) OR vCalendarFM < 1 OR vCalendarFM > 12) then
 		// business / fiscal year = calendar year
 		LET vCalendarFM = 1;
 		LET vFirstMonth = vCalendarFM;
-		LET vLastMonth = 12;
-	else 
+	else
 		// shifted business / fiscal year
 		LET vFirstMonth = vCalendarFM;
-		LET vLastMonth = 12 - (12 - vFirstMonth + 1); // in the next calendar year
 	end if
 
 	// multi language calendar field name mapping ...
@@ -86,12 +84,12 @@ sub generateCalendar (vCalendarQualifier)
 		Day(datefield) AS $(vCalendarQualifier)$(vCalDay),
 		Weekday(datefield) AS $(vCalendarQualifier)$(vCalWeekday),
 		Week(datefield) AS $(vCalendarQualifier)$(vCalWeek),
-		if (Week(datefield) = Week(today()), 1, 0) AS $(vCalendarQualifier)$(vCalWeekCurrent), 
-		if (Week(datefield) = Week(today()) -1, 1, 0) AS $(vCalendarQualifier)$(vCalWeekPrevious), 		
+		if (Week(datefield) = Week(today()) AND weekyear(datefield) = weekyear(today()), 1, 0) AS $(vCalendarQualifier)$(vCalWeekCurrent),
+		if (Week(datefield) = Week(today()-7) AND weekyear(datefield) = weekyear(today()-7), 1, 0) AS $(vCalendarQualifier)$(vCalWeekPrevious),	
 		Month(datefield) AS $(vCalendarQualifier)$(vCalMonth),
 		num(Month(datefield)) AS $(vCalendarQualifier)$(vCalMonthNo),	
-		if (month(datefield) = month(today()), 1, 0) AS $(vCalendarQualifier)$(vCalMonthCurrent), 
-		if (month(datefield) = month(MonthStart(today()) -1), 1, 0) AS $(vCalendarQualifier)$(vCalMonthPrevious), 		
+		if (month(datefield) = month(today()) AND year(datefield) = year(today()), 1, 0) AS $(vCalendarQualifier)$(vCalMonthCurrent),
+		if (month(datefield) = month(AddMonths(today(), -1)) AND year(datefield) = year(AddMonths(today(), -1)), 1, 0) AS $(vCalendarQualifier)$(vCalMonthPrevious),	
 		'Q' & ceil(month(datefield) / 3) AS $(vCalendarQualifier)$(vCalQuarter),
 		Year(datefield) AS $(vCalendarQualifier)$(vCalYear),
 		date(MonthStart(datefield), 'YYYY-MMM') AS $(vCalendarQualifier)$(vCalYearMonthName),
@@ -104,11 +102,11 @@ sub generateCalendar (vCalendarQualifier)
 		12 * (Year(Today()) - Year(datefield)) + Month(Today()) - Month(datefield) AS $(vCalendarQualifier)$(vCalMonthsAgo), 
 		date(datefield, '$(DateFormat)') AS $(vCalendarQualifier)$(vCalTimeRangeID), 
 		// Business / Fiscal Year
-		year(datefield) + if (month(datefield) >= $(vFirstMonth), 1, 0) AS $(vCalendarQualifier)$(vCalFYear), 
+		year(datefield) + if ($(vFirstMonth) > 1 AND month(datefield) >= $(vFirstMonth), 1, 0) AS $(vCalendarQualifier)$(vCalFYear),
 		'Q' & ceil(month(addMonths(datefield, ($(vFirstMonth) -1) * -1 )) / 3) AS $(vCalendarQualifier)$(vCalFQuarter), 			
 		mod(month(datefield) - $(vFirstMonth), 12) +1 AS $(vCalendarQualifier)$(vCalFMonth),
-		if (num(month(datefield)) = (mod(month(today()) - $(vFirstMonth), 12) +1), 1, 0) AS $(vCalendarQualifier)$(vCalFMonthCurrent), 
-		if (num(month(datefield)) = (mod(month(today()) - $(vFirstMonth), 12) +1) -1, 1, 0) AS $(vCalendarQualifier)$(vCalFMonthPrevious), 				
+		if (month(datefield) = month(today()) AND year(datefield) = year(today()), 1, 0) AS $(vCalendarQualifier)$(vCalFMonthCurrent),
+		if (month(datefield) = month(AddMonths(today(), -1)) AND year(datefield) = year(AddMonths(today(), -1)), 1, 0) AS $(vCalendarQualifier)$(vCalFMonthPrevious),			
 		if (DayNumberOfYear(datefield, $(vFirstMonth)) < DayNumberOfYear(today(), $(vFirstMonth)), 1, 0) AS $(vCalendarQualifier)YTD
 	RESIDENT tmp_datefield;
 
@@ -188,9 +186,10 @@ sub joinCalendar (targetTable, srcDateField, fieldPrefix)
 
 	DROP Table tmp_datefield;
 
-	TAG FIELDS $(fieldPrefix)$(vCalYearMonth), $(fieldPrefix)$(vCalYear) WITH '$dimension';
-	TAG FIELDS $(fieldPrefix)$(vCalMonth), $(fieldPrefix)YTD WITH '$dimension';
+	TAG FIELDS $(fieldPrefix)_$(vCalYearMonth), $(fieldPrefix)_$(vCalYear) WITH '$dimension';
+	TAG FIELDS $(fieldPrefix)_$(vCalMonth), $(fieldPrefix)_YTD WITH '$dimension';
 	
+	LET _srcDateField = null();
 	LET targetTable = null();
 	LET srcDateField = null();
 	LET fieldPrefix = null();
@@ -200,7 +199,7 @@ end sub
 
 sub stopCalendarService
 
-	FOR i=0 TO vCal_FieldIndex 
+	FOR i=1 TO vCal_FieldIndex
 		LET currentKey = FieldValue('fieldKey', i);
 		LET vCal$(currentKey) = null();	
 	NEXT
@@ -213,7 +212,8 @@ sub stopCalendarService
 	LET vCalendarStart=null();
 	LET vCalendarEnd=null();
 	LET vCalendarFM=null();
-		
+	LET vFirstMonth=null();
+
 end sub
 
 // Examples: Variable definition
