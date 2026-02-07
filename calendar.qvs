@@ -65,11 +65,11 @@ end sub
 
 sub generateCalendar (vCalendarQualifier) 
 
-	// call logInfo ('generate primary calendar (field name language $(vDataModelLanguage)) ');
+	CALL logInfo('generate primary calendar (field name language $(vDataModelLanguage))');
 
 	if (not isNull(vCalendarQualifier) AND vCalendarQualifier <> '') then
-		// call logInfo ('=> with field qualifier $(vCalendarQualifier)');	
-	end if 
+		CALL logInfo('=> with field qualifier $(vCalendarQualifier)');
+	end if
 
 	tmp_datefield:
 	LOAD date($(vCalendarStart)+rowno()-1) AS datefield
@@ -169,7 +169,7 @@ end sub
 
 sub joinCalendar (targetTable, srcDateField, fieldPrefix)
 
-	// call logInfo ('generate calendar (field name language $(vDataModelLanguage)) based on $(srcDateField) and join it to table $(targetTable) with field prefix $(fieldPrefix)');
+	CALL logInfo('join calendar (language $(vDataModelLanguage)) based on $(srcDateField) into $(targetTable) with prefix $(fieldPrefix)');
 		
 	LET _srcDateField=PurgeChar(srcDateField,'"[]');
 

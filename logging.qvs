@@ -1,0 +1,146 @@
+// Logging Framework for Qlik Sense load scripts
+//
+// Provides structured logging with severity levels (INFO, WARN, ERROR),
+// row count tracking, and duration measurement per load step.
+//
+// Usage:
+//   CALL logInit('MyApp');
+//   CALL logInfo('Starting data load');
+//   CALL logRowCount('FactSales');
+//   CALL logStartTimer('Load Customers');
+//   // ... load logic ...
+//   CALL logStopTimer('Load Customers');
+//   CALL logWarn('Missing records detected');
+//   CALL logFinalize;
+//
+// The log table (_log) remains in the data model for QA dashboards.
+// Optionally call logExport to persist logs to a QVD before logFinalize.
+
+
+sub logInit (vLogAppName)
+
+	LET vLogStartTime = now();
+	LET vLogSequence = 0;
+
+	IF NOT IsNull(TableNumber('_log')) THEN
+		DROP Table _log;
+	END IF
+
+	_log:
+	LOAD * INLINE [
+	log_seq, log_timestamp, log_level, log_message, log_app, log_duration_sec
+	];
+
+	CALL logInfo('Log initialized for app: $(vLogAppName)');
+
+end sub
+
+
+sub _logWrite (vLogLevel, vLogMessage)
+
+	LET vLogSequence = $(vLogSequence) + 1;
+
+	Concatenate (_log)
+	LOAD * INLINE [
+	log_seq, log_timestamp, log_level, log_message, log_app, log_duration_sec
+	$(vLogSequence), $(Now()), $(vLogLevel), $(vLogMessage), $(vLogAppName),
+	];
+
+	// also trace to script output for monitoring
+	TRACE [$(vLogLevel)] $(vLogMessage);
+
+end sub
+
+
+sub logInfo (vLogMessage)
+	CALL _logWrite('INFO', '$(vLogMessage)');
+end sub
+
+
+sub logWarn (vLogMessage)
+	CALL _logWrite('WARN', '$(vLogMessage)');
+end sub
+
+
+sub logError (vLogMessage)
+	CALL _logWrite('ERROR', '$(vLogMessage)');
+end sub
+
+
+sub logRowCount (vLogTableName)
+
+	LET _logRC = NoOfRows('$(vLogTableName)');
+	CALL logInfo('Table [$(vLogTableName)] has $(_logRC) rows');
+	LET _logRC = null();
+
+end sub
+
+
+sub logStartTimer (vLogStepName)
+
+	LET vLogTimer_$(vLogStepName) = now();
+	CALL logInfo('Timer started: $(vLogStepName)');
+
+end sub
+
+
+sub logStopTimer (vLogStepName)
+
+	LET _logElapsed = Interval(now() - vLogTimer_$(vLogStepName), 'hh:mm:ss');
+	CALL logInfo('Timer stopped: $(vLogStepName) - duration: $(_logElapsed)');
+
+	// update the last log row with the duration in seconds
+	LET _logDurSec = (now() - vLogTimer_$(vLogStepName)) * 86400;
+
+	_log_tmp:
+	LOAD *,
+		if (log_seq = $(vLogSequence), $(_logDurSec), log_duration_sec) AS _log_duration_new
+	Resident _log;
+
+	DROP Table _log;
+
+	_log:
+	NoConcatenate
+	LOAD log_seq, log_timestamp, log_level, log_message, log_app,
+		_log_duration_new AS log_duration_sec
+	Resident _log_tmp;
+
+	DROP Table _log_tmp;
+
+	LET vLogTimer_$(vLogStepName) = null();
+	LET _logElapsed = null();
+	LET _logDurSec = null();
+
+end sub
+
+
+sub logExport (vLogExportPath)
+
+	// persist log to QVD for historical analysis
+	STORE _log INTO [$(vLogExportPath)] (qvd);
+	CALL logInfo('Log exported to $(vLogExportPath)');
+
+end sub
+
+
+sub logFinalize
+
+	LET _logTotalDuration = Interval(now() - vLogStartTime, 'hh:mm:ss');
+	CALL logInfo('Load completed - total duration: $(_logTotalDuration)');
+
+	LET _logTotalDuration = null();
+	LET vLogStartTime = null();
+	LET vLogSequence = null();
+	LET vLogAppName = null();
+
+end sub
+
+
+// Examples:
+// CALL logInit('Sales Dashboard');
+// CALL logStartTimer('Load Facts');
+// // ... your load script ...
+// CALL logStopTimer('Load Facts');
+// CALL logRowCount('FactSales');
+// CALL logExport('lib://QVD/logs/load_log.qvd');
+// CALL logFinalize;
